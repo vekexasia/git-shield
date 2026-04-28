@@ -1,0 +1,6 @@
+# Test fixture values used by this repository.
+# These are synthetic and intentionally narrow.
+(?i)^real\.person@gmail\.com$
+(?i)^mario\.rossi@gmail\.com$
+(?i)^\+393392506412$
+(?i)^Mario Rossi$
