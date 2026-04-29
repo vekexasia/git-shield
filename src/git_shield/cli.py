@@ -6,13 +6,21 @@ import json
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from .allowlist import load_patterns
 from .chunking import chunk_text, chunk_text_offsets
 from .config import Config, load_config
 from .cuda import has_cuda, resolve_device
-from .diff import added_text, added_text_by_file, diff_with_fallback, staged_diff
+from .diff import (
+    added_text,
+    added_text_by_file,
+    diff_with_fallback,
+    parse_file_changes,
+    show_blob,
+    staged_diff,
+)
 from .doctor import checks_ok, collect_checks, fix_hint
 from .init_config import write_starter_files
 from .install import install_global_hook, install_hook, uninstall_global_hook, uninstall_hook
@@ -20,6 +28,15 @@ from .opf import OpenAIPrivacyFilterDetector, OpfError, PrivacyFinding, detect_c
 from .prepush import parse_prepush_stdin, resolve_base
 from .scanner import filter_findings
 from .secrets import SecretScanError, scan_secrets_with_gitleaks
+
+
+@dataclass(frozen=True)
+class FilePayload:
+    secret_text: str
+    pii_text: str
+    # File line numbers in `pii_text` that count as "added" for PII purposes.
+    # None means scan every line (audit mode or fallback when post-image is unavailable).
+    added_lines: frozenset[int] | None
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -204,13 +221,13 @@ def _scan_secret_files(files: dict[str, str], cfg: Config, args: argparse.Namesp
     return 0
 
 
-def _scan_pii_files(files: dict[str, str], cfg: Config, args: argparse.Namespace) -> int:
-    text = "\n".join(files.values())
-    if not text.strip():
+def _scan_pii_files(payloads: dict[str, FilePayload], cfg: Config, args: argparse.Namespace) -> int:
+    payloads = {p: pl for p, pl in payloads.items() if pl.pii_text.strip()}
+    if not payloads:
         _print("No added text to scan for PII.")
         return 0
 
-    total_bytes = len(text.encode("utf-8"))
+    total_bytes = sum(len(pl.pii_text.encode("utf-8")) for pl in payloads.values())
     if total_bytes > cfg.max_total_bytes:
         _print(f"Diff is {total_bytes} bytes (> {cfg.max_total_bytes}); refuse to scan.")
         return 1
@@ -242,11 +259,9 @@ def _scan_pii_files(files: dict[str, str], cfg: Config, args: argparse.Namespace
     ]
     allow_patterns = load_patterns(allow_paths)
     findings_by_file = []
-    for path, file_text in files.items():
-        if not file_text.strip():
-            continue
+    for path, payload in payloads.items():
         raw_findings: list[PrivacyFinding] = []
-        for offset, chunk in chunk_text_offsets(file_text, cfg.max_bytes_per_chunk):
+        for offset, chunk in chunk_text_offsets(payload.pii_text, cfg.max_bytes_per_chunk):
             try:
                 chunk_findings = detector.detect(chunk)
             except OpfError as exc:
@@ -256,7 +271,10 @@ def _scan_pii_files(files: dict[str, str], cfg: Config, args: argparse.Namespace
                 start = offset + finding.start if finding.start is not None else None
                 end = offset + finding.end if finding.end is not None else None
                 raw_findings.append(PrivacyFinding(finding.label, finding.text, start, end))
-        for finding in filter_findings(raw_findings, allow_patterns, set(cfg.labels), source_text=file_text):
+        for finding in filter_findings(raw_findings, allow_patterns, set(cfg.labels), source_text=payload.pii_text):
+            if payload.added_lines is not None and (finding.line is None or finding.line not in payload.added_lines):
+                # Pre-existing data on an untouched line — not introduced by this push.
+                continue
             findings_by_file.append((path, finding))
 
     if not findings_by_file:
@@ -273,15 +291,49 @@ def _scan_pii_files(files: dict[str, str], cfg: Config, args: argparse.Namespace
     return 1
 
 
-def _scan_file_payloads(files: dict[str, str], cfg: Config, args: argparse.Namespace) -> int:
-    files = {path: text for path, text in files.items() if text.strip()}
-    if not files:
+def _scan_file_payloads(payloads: dict[str, FilePayload], cfg: Config, args: argparse.Namespace) -> int:
+    payloads = {
+        path: pl for path, pl in payloads.items()
+        if pl.secret_text.strip() or pl.pii_text.strip()
+    }
+    if not payloads:
         _print("No added text to scan.")
         return 0
-    code = _scan_secret_files(files, cfg, args)
+    secret_files = {path: pl.secret_text for path, pl in payloads.items() if pl.secret_text.strip()}
+    code = _scan_secret_files(secret_files, cfg, args) if secret_files else 0
     if code != 0:
         return code
-    return _scan_pii_files(files, cfg, args)
+    return _scan_pii_files(payloads, cfg, args)
+
+
+def _payloads_from_changes(
+    changes: dict,
+    head_ref: str | None,
+    cwd: str | None = None,
+) -> dict[str, FilePayload]:
+    """Build per-file payloads from a parsed diff.
+
+    For PII context we fetch the post-image (`git show <head_ref>:<path>`) so the
+    detector sees the file as it lands. If unavailable (new untracked file, ref
+    missing, binary), we fall back to the synthesized added-text blob and scan
+    every line of it (no line-set filter).
+    """
+    out: dict[str, FilePayload] = {}
+    for path, change in changes.items():
+        full = show_blob(head_ref, path, cwd=cwd) if head_ref else None
+        if full is not None and full.strip():
+            out[path] = FilePayload(
+                secret_text=change.added_text,
+                pii_text=full,
+                added_lines=change.added_lines or None,
+            )
+        else:
+            out[path] = FilePayload(
+                secret_text=change.added_text,
+                pii_text=change.added_text,
+                added_lines=None,
+            )
+    return out
 
 
 def _scan_payload(text: str, cfg: Config, args: argparse.Namespace) -> int:
@@ -354,8 +406,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     cfg = _effective_config(args)
     if args.stdin:
         return _scan_payload(sys.stdin.read(), cfg, args)
-    files = added_text_by_file(diff_with_fallback(args.base, args.head), cfg.ignore_globs)
-    return _scan_file_payloads(files, cfg, args)
+    diff = diff_with_fallback(args.base, args.head)
+    changes = parse_file_changes(diff, cfg.ignore_globs)
+    payloads = _payloads_from_changes(changes, head_ref=args.head)
+    return _scan_file_payloads(payloads, cfg, args)
 
 
 def _cmd_prepush(args: argparse.Namespace) -> int:
@@ -365,15 +419,32 @@ def _cmd_prepush(args: argparse.Namespace) -> int:
         _print("No refs on stdin; nothing to scan.")
         return 0
 
-    files: dict[str, str] = {}
+    payloads: dict[str, FilePayload] = {}
     for ref in refs:
         base = resolve_base(ref, fallback=args.fallback_base)
         if base is None:
             continue
         diff = diff_with_fallback(base, ref.local_sha)
-        for path, text in added_text_by_file(diff, cfg.ignore_globs).items():
-            files[path] = "\n".join(part for part in [files.get(path, ""), text] if part)
-    return _scan_file_payloads(files, cfg, args)
+        changes = parse_file_changes(diff, cfg.ignore_globs)
+        for path, payload in _payloads_from_changes(changes, head_ref=ref.local_sha).items():
+            existing = payloads.get(path)
+            if existing is None:
+                payloads[path] = payload
+                continue
+            # Multiple refs touched the same path — merge added-lines and prefer
+            # the richer post-image (full file) over a fallback added-text blob.
+            if payload.added_lines is None or existing.added_lines is None:
+                merged_lines = None
+            else:
+                merged_lines = existing.added_lines | payload.added_lines
+            merged_secret = "\n".join(part for part in [existing.secret_text, payload.secret_text] if part)
+            merged_pii = payload.pii_text if payload.added_lines is not None else existing.pii_text
+            payloads[path] = FilePayload(
+                secret_text=merged_secret,
+                pii_text=merged_pii,
+                added_lines=merged_lines,
+            )
+    return _scan_file_payloads(payloads, cfg, args)
 
 
 def _cmd_secrets(args: argparse.Namespace) -> int:
@@ -530,7 +601,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         _print(str(exc))
         return 1
-    files: dict[str, str] = {}
+    payloads: dict[str, FilePayload] = {}
     skipped = 0
     for rel in paths:
         if _ignored_path(rel, cfg.ignore_globs):
@@ -548,9 +619,9 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         if "\0" in text:
             skipped += 1
             continue
-        files[rel] = text
-    _print(f"audit scanning {len(files)} files; skipped {skipped}")
-    return _scan_file_payloads(files, cfg, args)
+        payloads[rel] = FilePayload(secret_text=text, pii_text=text, added_lines=None)
+    _print(f"audit scanning {len(payloads)} files; skipped {skipped}")
+    return _scan_file_payloads(payloads, cfg, args)
 
 
 def _cmd_bootstrap(args: argparse.Namespace) -> int:

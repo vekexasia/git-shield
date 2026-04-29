@@ -231,6 +231,48 @@ def test_cli_prepush_blocks_on_pii(stub_opf, monkeypatch, tmp_path):
     assert "private_email" in err
 
 
+def test_cli_prepush_skips_pii_outside_touched_lines(stub_opf, monkeypatch, tmp_path):
+    """PII present in the post-image file but on lines not touched by the diff
+    must not block the push — it's pre-existing data."""
+    diff = (
+        "diff --git a/file.txt b/file.txt\n"
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -1,0 +1,1 @@\n"
+        "+harmless added line\n"
+    )
+    full = "harmless added line\nreal.person@gmail.com\n"  # email lives on line 2 (untouched)
+    monkeypatch.setattr("git_shield.cli.diff_with_fallback", lambda *a, **kw: diff)
+    monkeypatch.setattr("git_shield.cli.show_blob", lambda *a, **kw: full)
+    code, _, err = _run(
+        ["prepush", "--device", "cpu", "--config", str(tmp_path / "missing.toml")],
+        stdin="refs/heads/main aaa refs/heads/main bbb\n",
+    )
+    assert code == 0
+    assert "No OPF PII findings" in err
+
+
+def test_cli_prepush_blocks_pii_on_touched_line(stub_opf, monkeypatch, tmp_path):
+    """PII landing on a touched line must block, with the correct file line number."""
+    diff = (
+        "diff --git a/file.txt b/file.txt\n"
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -2,0 +2,1 @@\n"
+        "+real.person@gmail.com\n"
+    )
+    full = "context line\nreal.person@gmail.com\nmore context\n"  # email on line 2 (touched)
+    monkeypatch.setattr("git_shield.cli.diff_with_fallback", lambda *a, **kw: diff)
+    monkeypatch.setattr("git_shield.cli.show_blob", lambda *a, **kw: full)
+    code, _, err = _run(
+        ["prepush", "--device", "cpu", "--config", str(tmp_path / "missing.toml")],
+        stdin="refs/heads/main aaa refs/heads/main bbb\n",
+    )
+    assert code == 1
+    assert "private_email" in err
+    assert "line 2" in err
+
+
 def test_cli_no_subcommand_returns_help(tmp_path):
     code, _, err = _run([])
     assert code == 2

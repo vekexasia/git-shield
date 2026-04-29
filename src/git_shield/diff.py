@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import subprocess
 from dataclasses import dataclass
+
+
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 @dataclass(frozen=True)
 class AddedLine:
     path: str
     text: str
+    line: int = 0  # 1-based new-file line; 0 if unknown
+
+
+@dataclass(frozen=True)
+class FileChange:
+    path: str
+    added_text: str
+    added_lines: frozenset[int]
 
 
 def _path_ignored(path: str, ignore_globs: tuple[str, ...]) -> bool:
@@ -20,7 +32,7 @@ def parse_added_lines(
     diff_text: str,
     ignore_globs: tuple[str, ...] = (),
 ) -> list[AddedLine]:
-    """Extract added lines from a unified git diff.
+    """Extract added lines from a unified git diff, tagged with new-file line numbers.
 
     Skips:
       - diff metadata (`+++`/`---`)
@@ -29,12 +41,14 @@ def parse_added_lines(
     """
     current_path = "<unknown>"
     skip_current = False
+    new_line_no = 0
     lines: list[AddedLine] = []
 
     for raw in diff_text.splitlines():
         if raw.startswith("diff --git "):
             current_path = "<unknown>"
             skip_current = False
+            new_line_no = 0
             continue
         if raw.startswith("+++ b/"):
             current_path = raw[6:]
@@ -49,8 +63,18 @@ def parse_added_lines(
             continue
         if skip_current:
             continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            new_line_no = int(m.group(1))
+            continue
         if raw.startswith("+") and not raw.startswith("+++"):
-            lines.append(AddedLine(current_path, raw[1:]))
+            lines.append(AddedLine(current_path, raw[1:], new_line_no))
+            new_line_no += 1
+            continue
+        if raw.startswith(" "):
+            new_line_no += 1
+            continue
+        # `-` deletions and `\ No newline ...` markers do not advance the new-file counter.
 
     return lines
 
@@ -60,6 +84,22 @@ def added_text_by_file(diff_text: str, ignore_globs: tuple[str, ...] = ()) -> di
     for line in parse_added_lines(diff_text, ignore_globs):
         files.setdefault(line.path, []).append(line.text)
     return {path: "\n".join(lines) for path, lines in files.items()}
+
+
+def parse_file_changes(diff_text: str, ignore_globs: tuple[str, ...] = ()) -> dict[str, FileChange]:
+    """Group `parse_added_lines` output by file, exposing both joined added text
+    and the set of new-file line numbers that were added."""
+    grouped: dict[str, list[AddedLine]] = {}
+    for line in parse_added_lines(diff_text, ignore_globs):
+        grouped.setdefault(line.path, []).append(line)
+    return {
+        path: FileChange(
+            path=path,
+            added_text="\n".join(item.text for item in items),
+            added_lines=frozenset(item.line for item in items if item.line),
+        )
+        for path, items in grouped.items()
+    }
 
 
 def added_text(diff_text: str, ignore_globs: tuple[str, ...] = ()) -> str:
@@ -131,3 +171,25 @@ def diff_with_fallback(
     if mb:
         return git_diff(mb, head, cwd, runner=runner)
     return ""
+
+
+def show_blob(
+    ref: str,
+    path: str,
+    cwd: str | None = None,
+    runner=subprocess.run,
+) -> str | None:
+    """Return the file contents at `ref:path`, or None if missing/binary/unreadable."""
+    proc = runner(
+        ["git", "show", f"{ref}:{path}"],
+        text=True,
+        capture_output=True,
+        errors="replace",
+        cwd=cwd,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    if "\0" in proc.stdout:
+        return None
+    return proc.stdout

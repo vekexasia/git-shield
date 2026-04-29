@@ -6,6 +6,7 @@ from git_shield.diff import (
     git_diff,
     merge_base,
     parse_added_lines,
+    parse_file_changes,
 )
 
 
@@ -46,6 +47,46 @@ def test_parse_added_lines_skips_glob_extension():
 +binary-bytes-pretending
 """
     assert parse_added_lines(diff, ignore_globs=("*.png",)) == []
+
+
+def test_parse_added_lines_tracks_new_file_line_numbers():
+    diff = """diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,2 +1,4 @@
+ keep
+-old
++new1
++new2
+@@ -10,0 +12,1 @@
++far-down
+"""
+    lines = parse_added_lines(diff)
+    assert [(l.text, l.line) for l in lines] == [
+        ("new1", 2),
+        ("new2", 3),
+        ("far-down", 12),
+    ]
+
+
+def test_parse_file_changes_groups_by_path_with_added_lines():
+    diff = """diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -0,0 +1,2 @@
++hello
++world
+diff --git a/b.txt b/b.txt
+--- a/b.txt
++++ b/b.txt
+@@ -5,0 +6,1 @@
++later
+"""
+    changes = parse_file_changes(diff)
+    assert set(changes) == {"a.txt", "b.txt"}
+    assert changes["a.txt"].added_text == "hello\nworld"
+    assert changes["a.txt"].added_lines == frozenset({1, 2})
+    assert changes["b.txt"].added_lines == frozenset({6})
 
 
 def test_parse_added_lines_skips_binary_marker():
