@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560">
+  <defs>
+    <style>
+      .bg { fill: #0d1117; }
+      .bar { fill: #161b22; }
+      .dot1 { fill: #ff5f56; }
+      .dot2 { fill: #ffbd2e; }
+      .dot3 { fill: #27c93f; }
+      .text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 17px; fill: #c9d1d9; }
+      .muted { fill: #8b949e; }
+      .cmd { fill: #79c0ff; }
+      .ok { fill: #3fb950; }
+      .warn { fill: #f85149; }
+      .yellow { fill: #d29922; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="980" height="560" rx="14"/>
+  <rect class="bar" x="0" y="0" width="980" height="44" rx="14"/>
+  <circle class="dot1" cx="24" cy="22" r="7"/>
+  <circle class="dot2" cx="47" cy="22" r="7"/>
+  <circle class="dot3" cx="70" cy="22" r="7"/>
+  <text class="text muted" x="100" y="28">git-shield demo</text>
+
+  <text class="text cmd" x="26" y="78">$ git-shield doctor --smoke</text>
+  <text class="text ok" x="26" y="108">[git-shield] ok: git: /usr/bin/git</text>
+  <text class="text ok" x="26" y="132">[git-shield] ok: gitleaks: /usr/local/bin/gitleaks</text>
+  <text class="text ok" x="26" y="156">[git-shield] ok: opf: /home/me/.local/bin/opf</text>
+  <text class="text ok" x="26" y="180">[git-shield] ok: secret smoke detected synthetic key with redacted output</text>
+  <text class="text ok" x="26" y="204">[git-shield] ok: PII smoke detected synthetic email/person with redacted output</text>
+
+  <text class="text cmd" x="26" y="250">$ git commit -m "add config"</text>
+  <text class="text warn" x="26" y="280">[git-shield] gitleaks detected possible secrets in .env. Operation blocked.</text>
+  <text class="text warn" x="26" y="304">[git-shield]   .env: line 1: generic-api-key: OPENAI_API_KEY=REDACTED</text>
+
+  <text class="text cmd" x="26" y="350">$ git push origin main</text>
+  <text class="text ok" x="26" y="380">[git-shield] No gitleaks secret findings.</text>
+  <text class="text warn" x="26" y="404">[git-shield] OpenAI Privacy Filter detected possible PII/secrets. Operation blocked.</text>
+  <text class="text warn" x="26" y="428">[git-shield]   customer.txt: line 12: private_email: [email:redacted]</text>
+  <text class="text warn" x="26" y="452">[git-shield]   customer.txt: line 12: private_person: [person:redacted]</text>
+  <text class="text muted" x="26" y="488">error: failed to push some refs to 'github.com:example/repo.git'</text>
+
+  <text class="text yellow" x="26" y="528">Your code stayed local. Secrets and PII were not printed raw.</text>
+</svg>
