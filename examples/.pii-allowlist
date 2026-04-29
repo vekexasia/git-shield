@@ -1,0 +1,9 @@
+# Drop this file at the root of any repo as `.pii-allowlist`.
+# One Python regex per line; keep entries narrow and explicit.
+# Lines starting with `#` and blank lines are ignored.
+
+# Common public/test addresses that OPF will flag as private_email.
+(?i)^[^@\s]+@example\.(?:com|org|net)$
+(?i)^[^@\s]+@test\.(?:com|org|net)$
+(?i)^git@github\.com$
+(?i)^[^@\s]+@users\.noreply\.github\.com$

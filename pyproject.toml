@@ -1,9 +1,24 @@
 [project]
-name = "openai-privacy-prepush"
+name = "git-shield"
 version = "0.1.0"
-description = "Pre-push PII guard powered by OpenAI Privacy Filter"
+description = "Git safety net for vibe coding: blocks API keys, secrets, and contextual PII before commit/push"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["git", "pre-commit", "pre-push", "privacy", "pii", "secrets", "gitleaks", "vibe-coding", "safety"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Version Control :: Git",
+  "Topic :: Security",
+]
 dependencies = []
 
 [project.optional-dependencies]
@@ -15,14 +30,33 @@ test = [
 ]
 
 [project.scripts]
-privacy-prepush = "privacy_prepush.cli:main"
+git-shield = "git_shield.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vekexasia/git-shield"
+Issues = "https://github.com/vekexasia/git-shield/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/privacy_prepush"]
+packages = ["src/git_shield"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/git_shield",
+  "tests",
+  "examples",
+  ".pre-commit-hooks.yaml",
+  "README.md",
+  "MODEL_EVAL.md",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+  "LICENSE",
+  "TODO.md",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

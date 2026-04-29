@@ -1,0 +1,19 @@
+- id: git-shield
+  name: Privacy pre-push guard
+  description: Block pushes containing secrets or contextual PII.
+  entry: git-shield prepush
+  language: python
+  stages: [pre-push]
+  pass_filenames: false
+  require_serial: true
+  minimum_pre_commit_version: "3.2.0"
+
+- id: git-shield-secrets
+  name: Privacy secrets guard
+  description: Block staged API keys/secrets with gitleaks.
+  entry: git-shield secrets --staged
+  language: python
+  stages: [pre-commit]
+  pass_filenames: false
+  require_serial: true
+  minimum_pre_commit_version: "3.2.0"

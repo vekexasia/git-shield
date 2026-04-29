@@ -1,0 +1,49 @@
+# Drop this file at the root of any repo as `git-shield.toml`.
+# Every key has a sensible default; delete the ones you don't need to override.
+[git_shield]
+
+# OPF inference device: "cuda" (recommended), "cpu", or anything else `opf` supports.
+device = "cuda"
+
+# Path / name of the `opf` executable on PATH.
+opf_bin = "opf"
+
+# Per-OPF-call timeout (seconds).
+timeout_seconds = 180
+
+# Chunking guards for large diffs.
+max_bytes_per_chunk = 65536       # ARG_MAX-safe slice size
+max_total_bytes     = 2097152     # 2 MB — refuse to scan above this
+
+# What CMS labels should block the push. See OpenAI Privacy Filter docs for the
+# full label set; these are the conservative defaults.
+labels = [
+  "private_email",
+  "private_phone",
+  "private_person",
+  "private_address",
+  "private_url",
+  "private_date",
+  "account_number",
+  "secret",
+]
+
+# File globs whose added lines should never be sent to OPF (binary, lockfiles, ...).
+ignore_globs = [
+  "*.lock", "*.lockb", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+  "poetry.lock", "Cargo.lock", "uv.lock",
+  "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.pdf", "*.ico",
+  "*.zip", "*.tar", "*.tgz", "*.gz",
+  "*.bin", "*.exe", "*.dll", "*.so", "*.dylib",
+  "*.woff", "*.woff2", "*.ttf",
+]
+
+# Behaviour when CUDA is requested but unavailable:
+#   "fail"      — let OPF error out as usual
+#   "skip"      — bail with a warning, don't block the push
+#   "cpu-small" — fall back to CPU only if the diff is under cpu_small_threshold
+cuda_policy = "cpu-small"
+cpu_small_threshold = 16384
+
+# Extra regex allowlists in addition to ~/.githooks/pii-allowlist.txt and ./.pii-allowlist.
+allowlist_paths = []

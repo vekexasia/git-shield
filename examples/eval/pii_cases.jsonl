@@ -1,0 +1,10 @@
+{"id":"email_plain","text":"Please contact Giuseppe Verdi at giuseppe.verdi@gmail.com.","labels":["private_person","private_email"]}
+{"id":"phone_plain","text":"Customer phone is +39 333 111 2222 for the dinner booking.","labels":["private_phone"]}
+{"id":"address_it","text":"La consegna va fatta in Via Roma 12, Milano.","labels":["private_address"]}
+{"id":"date_birth","text":"Mario Rossi was born on 1984-05-16.","labels":["private_person","private_date"]}
+{"id":"secret_token","text":"Do not commit OPENAI_API_KEY=sk-test-1234567890abcdef.","labels":["secret"]}
+{"id":"public_test_email","text":"Use user1@test.com in fixtures only.","labels":[]}
+{"id":"github_noreply","text":"Commit author is 12345+bot@users.noreply.github.com.","labels":[]}
+{"id":"restaurant_public_contact","text":"Public support address: ristomenu@1due3.com.","labels":[]}
+{"id":"code_placeholder","text":"const email = \"user@example.com\"; const phone = \"+1 555 0100\";","labels":[]}
+{"id":"person_only_context","text":"The booking was created by Francesca Bianchi yesterday.","labels":["private_person"]}
