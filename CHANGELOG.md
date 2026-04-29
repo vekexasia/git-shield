@@ -9,6 +9,7 @@
 - Add `uninstall` command.
 - Add `doctor` command with fix hints and `--smoke` synthetic detection tests.
 - Add `status` command for hooks, dependencies, config, and allowlists.
+- Add JSON output for `doctor` and `status`.
 - Add `bootstrap` command for guided setup.
 - Add `audit` command for repository file scans.
 - Add `init` command for starter config files.

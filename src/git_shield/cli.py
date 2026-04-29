@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
 import shutil
 import subprocess
 import sys
@@ -66,10 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--smoke", action="store_true", help="run synthetic secret and PII smoke tests")
     doctor.add_argument("--device", default="cuda")
     doctor.add_argument("--timeout", type=int, default=180)
+    doctor.add_argument("--json", action="store_true", help="write machine-readable JSON to stdout")
 
     status = sub.add_parser("status", help="show installed hooks, config, allowlists, and dependencies")
     status.add_argument("--repo", default=Path("."), type=Path)
     status.add_argument("--global", dest="global_status", action="store_true")
+    status.add_argument("--json", action="store_true", help="write machine-readable JSON to stdout")
 
     audit = sub.add_parser("audit", help="scan repository files, not just a git diff")
     _add_common(audit)
@@ -383,6 +386,27 @@ def _cmd_secrets(args: argparse.Namespace) -> int:
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     checks = collect_checks(args.opf_bin, args.gitleaks_bin)
+    smoke = None
+    if args.smoke and checks_ok(checks):
+        smoke_code = _cmd_smoke(args.gitleaks_bin, args.opf_bin, args.device, args.timeout, quiet=args.json)
+        smoke = {"ok": smoke_code == 0}
+    if args.json:
+        payload = {
+            "ok": checks_ok(checks) and (smoke is None or smoke["ok"]),
+            "checks": [
+                {
+                    "name": check.name,
+                    "ok": check.ok,
+                    "required": check.required,
+                    "detail": check.detail,
+                    "fix": fix_hint(check),
+                }
+                for check in checks
+            ],
+            "smoke": smoke,
+        }
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
     for check in checks:
         status = "ok" if check.ok else ("missing" if check.required else "warn")
         _print(f"{status}: {check.name}: {check.detail}")
@@ -393,21 +417,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         _print("Install missing required dependencies before enabling hooks.")
         return 1
     if args.smoke:
-        return _cmd_smoke(args.gitleaks_bin, args.opf_bin, args.device, args.timeout)
+        return 0 if smoke and smoke["ok"] else 1
     return 0
 
 
-def _cmd_smoke(gitleaks_bin: str, opf_bin: str, device: str, timeout: int) -> int:
+def _cmd_smoke(gitleaks_bin: str, opf_bin: str, device: str, timeout: int, quiet: bool = False) -> int:
+    def say(msg: str) -> None:
+        if not quiet:
+            _print(msg)
+
     try:
         synthetic_key = "OPENAI" + "_API_KEY=" + "sk-" + "1234567890abcdef" * 3 + "\n"
         secret = scan_secrets_with_gitleaks(synthetic_key, gitleaks_bin, timeout)
     except (FileNotFoundError, SecretScanError) as exc:
-        _print(f"secret smoke failed: {exc}")
+        say(f"secret smoke failed: {exc}")
         return 1
     if not secret.found:
-        _print("secret smoke failed: gitleaks did not flag synthetic key")
+        say("secret smoke failed: gitleaks did not flag synthetic key")
         return 1
-    _print("ok: secret smoke detected synthetic key with redacted output")
+    say("ok: secret smoke detected synthetic key with redacted output")
 
     detector = OpenAIPrivacyFilterDetector(opf_bin, device, timeout)
     try:
@@ -418,13 +446,13 @@ def _cmd_smoke(gitleaks_bin: str, opf_bin: str, device: str, timeout: int) -> in
             load_patterns(),
         )
     except OpfError as exc:
-        _print(f"PII smoke failed: {exc}")
+        say(f"PII smoke failed: {exc}")
         return 1
     labels = {finding.label for finding in findings}
     if "private_email" not in labels:
-        _print("PII smoke failed: OPF did not flag synthetic email")
+        say("PII smoke failed: OPF did not flag synthetic email")
         return 1
-    _print("ok: PII smoke detected synthetic email/person with redacted output")
+    say("ok: PII smoke detected synthetic email/person with redacted output")
     return 0
 
 
@@ -439,21 +467,33 @@ def _hook_status(path: Path) -> str:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     checks = collect_checks()
+    root = Path.home() / ".githooks" if args.global_status else args.repo / ".git" / "hooks"
+    cfg = args.repo / "git-shield.toml"
+    allow = args.repo / ".pii-allowlist"
+    payload = {
+        "checks": [
+            {"name": check.name, "ok": check.ok, "required": check.required, "detail": check.detail}
+            for check in checks
+        ],
+        "hook_dir": str(root),
+        "hooks": {
+            "pre-commit": _hook_status(root / "pre-commit"),
+            "pre-push": _hook_status(root / "pre-push"),
+        },
+        "config": str(cfg) if cfg.exists() else None,
+        "allowlist": str(allow) if allow.exists() else None,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
     for check in checks:
         status = "ok" if check.ok else ("missing" if check.required else "warn")
         _print(f"{status}: {check.name}: {check.detail}")
-
-    if args.global_status:
-        root = Path.home() / ".githooks"
-    else:
-        root = args.repo / ".git" / "hooks"
     _print(f"hook dir: {root}")
-    _print(f"pre-commit: {_hook_status(root / 'pre-commit')}")
-    _print(f"pre-push: {_hook_status(root / 'pre-push')}")
-    cfg = args.repo / "git-shield.toml"
-    allow = args.repo / ".pii-allowlist"
-    _print(f"config: {cfg if cfg.exists() else 'not found'}")
-    _print(f"allowlist: {allow if allow.exists() else 'not found'}")
+    _print(f"pre-commit: {payload['hooks']['pre-commit']}")
+    _print(f"pre-push: {payload['hooks']['pre-push']}")
+    _print(f"config: {payload['config'] or 'not found'}")
+    _print(f"allowlist: {payload['allowlist'] or 'not found'}")
     return 0
 
 

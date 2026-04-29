@@ -121,7 +121,9 @@ Why PII runs at pre-push instead of pre-commit:
 ```bash
 git-shield doctor                         # check dependencies
 git-shield doctor --smoke                 # run synthetic secret + PII smoke tests
+git-shield doctor --json                  # machine-readable dependency status
 git-shield status --global                # show installed hooks and dependencies
+git-shield status --global --json         # machine-readable hook status
 git-shield bootstrap --smoke --force      # doctor + init + global install
 git-shield init                           # write starter config and allowlist
 git-shield secrets --staged               # scan staged additions for secrets
