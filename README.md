@@ -4,7 +4,7 @@ A local Git safety net for vibe coding. Git Shield blocks API keys, secrets, and
 
 It is meant for projects where AI-generated edits, copied logs, quick experiments, support snippets, or test fixtures can accidentally introduce sensitive data.
 
-![Git Shield demo](docs/demo-v2.gif)
+![Git Shield demo](docs/demo-v3.gif)
 
 ## What it does
 
