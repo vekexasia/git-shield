@@ -181,6 +181,23 @@ def test_cli_install_refuses_overwrite(tmp_path: Path):
     assert "exists" in err
 
 
+def test_cli_status_reports_hooks(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    _run(["install", "--repo", str(repo)])
+    code, _, err = _run(["status", "--repo", str(repo)])
+    assert code == 0
+    assert "pre-commit: installed" in err
+    assert "pre-push: installed" in err
+
+
+def test_cli_install_dry_run(tmp_path: Path):
+    repo = tmp_path / "repo"
+    code, _, err = _run(["install", "--repo", str(repo), "--dry-run"])
+    assert code == 0
+    assert "Would write" in err
+
+
 def test_cli_prepush_subcommand_skips_delete(stub_opf, monkeypatch, tmp_path):
     """A delete-only push (local-sha all zeroes) means no diff to scan."""
     monkeypatch.setattr("git_shield.cli.diff_with_fallback", lambda *a, **kw: "")

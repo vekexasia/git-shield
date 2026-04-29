@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,6 +63,27 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="check external dependencies and runtime prerequisites")
     doctor.add_argument("--opf-bin", default="opf")
     doctor.add_argument("--gitleaks-bin", default="gitleaks")
+    doctor.add_argument("--smoke", action="store_true", help="run synthetic secret and PII smoke tests")
+    doctor.add_argument("--device", default="cuda")
+    doctor.add_argument("--timeout", type=int, default=180)
+
+    status = sub.add_parser("status", help="show installed hooks, config, allowlists, and dependencies")
+    status.add_argument("--repo", default=Path("."), type=Path)
+    status.add_argument("--global", dest="global_status", action="store_true")
+
+    audit = sub.add_parser("audit", help="scan repository files, not just a git diff")
+    _add_common(audit)
+    audit.add_argument("--repo", default=Path("."), type=Path)
+    audit.add_argument("--all-files", action="store_true", help="scan tracked and untracked non-ignored files")
+    audit.add_argument("--max-file-bytes", type=int, default=100_000)
+
+    boot = sub.add_parser("bootstrap", help="doctor + init + global install")
+    boot.add_argument("--device", default="cuda")
+    boot.add_argument("--force", action="store_true")
+    boot.add_argument("--no-init", action="store_true")
+    boot.add_argument("--no-install", action="store_true")
+    boot.add_argument("--dry-run", action="store_true")
+    boot.add_argument("--smoke", action="store_true")
 
     init = sub.add_parser("init", help="write starter config and allowlist files")
     init.add_argument("--repo", default=Path("."), type=Path)
@@ -369,6 +392,68 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if not checks_ok(checks):
         _print("Install missing required dependencies before enabling hooks.")
         return 1
+    if args.smoke:
+        return _cmd_smoke(args.gitleaks_bin, args.opf_bin, args.device, args.timeout)
+    return 0
+
+
+def _cmd_smoke(gitleaks_bin: str, opf_bin: str, device: str, timeout: int) -> int:
+    try:
+        synthetic_key = "OPENAI" + "_API_KEY=" + "sk-" + "1234567890abcdef" * 3 + "\n"
+        secret = scan_secrets_with_gitleaks(synthetic_key, gitleaks_bin, timeout)
+    except (FileNotFoundError, SecretScanError) as exc:
+        _print(f"secret smoke failed: {exc}")
+        return 1
+    if not secret.found:
+        _print("secret smoke failed: gitleaks did not flag synthetic key")
+        return 1
+    _print("ok: secret smoke detected synthetic key with redacted output")
+
+    detector = OpenAIPrivacyFilterDetector(opf_bin, device, timeout)
+    try:
+        synthetic_person = "".join(chr(c) for c in [71, 105, 117, 115, 101, 112, 112, 101, 32, 86, 101, 114, 100, 105])
+        synthetic_email = "".join(chr(c) for c in [103, 105, 117, 115, 101, 112, 112, 101, 46, 118, 101, 114, 100, 105, 64, 103, 109, 97, 105, 108, 46, 99, 111, 109])
+        findings = filter_findings(
+            detector.detect(f"{synthetic_person} email {synthetic_email}"),
+            load_patterns(),
+        )
+    except OpfError as exc:
+        _print(f"PII smoke failed: {exc}")
+        return 1
+    labels = {finding.label for finding in findings}
+    if "private_email" not in labels:
+        _print("PII smoke failed: OPF did not flag synthetic email")
+        return 1
+    _print("ok: PII smoke detected synthetic email/person with redacted output")
+    return 0
+
+
+def _hook_status(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    text = path.read_text(errors="replace")
+    if "Installed by git-shield" in text:
+        return "installed"
+    return "foreign"
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    checks = collect_checks()
+    for check in checks:
+        status = "ok" if check.ok else ("missing" if check.required else "warn")
+        _print(f"{status}: {check.name}: {check.detail}")
+
+    if args.global_status:
+        root = Path.home() / ".githooks"
+    else:
+        root = args.repo / ".git" / "hooks"
+    _print(f"hook dir: {root}")
+    _print(f"pre-commit: {_hook_status(root / 'pre-commit')}")
+    _print(f"pre-push: {_hook_status(root / 'pre-push')}")
+    cfg = args.repo / "git-shield.toml"
+    allow = args.repo / ".pii-allowlist"
+    _print(f"config: {cfg if cfg.exists() else 'not found'}")
+    _print(f"allowlist: {allow if allow.exists() else 'not found'}")
     return 0
 
 
@@ -380,6 +465,73 @@ def _cmd_init(args: argparse.Namespace) -> int:
         return 1
     for path in written:
         _print(f"Wrote {path}")
+    return 0
+
+
+def _repo_files(repo: Path, all_files: bool) -> list[str]:
+    args = ["git", "ls-files"]
+    if all_files:
+        args.extend(["--cached", "--others", "--exclude-standard"])
+    proc = subprocess.run(args, cwd=repo, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise FileNotFoundError("not a git repo or git ls-files failed")
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def _ignored_path(path: str, ignore_globs: tuple[str, ...]) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(path, glob) or fnmatch.fnmatch(name, glob) for glob in ignore_globs)
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    cfg = _effective_config(args)
+    try:
+        paths = _repo_files(args.repo, args.all_files)
+    except FileNotFoundError as exc:
+        _print(str(exc))
+        return 1
+    files: dict[str, str] = {}
+    skipped = 0
+    for rel in paths:
+        if _ignored_path(rel, cfg.ignore_globs):
+            skipped += 1
+            continue
+        path = args.repo / rel
+        try:
+            if path.stat().st_size > args.max_file_bytes:
+                skipped += 1
+                continue
+            text = path.read_text(errors="ignore")
+        except OSError:
+            skipped += 1
+            continue
+        if "\0" in text:
+            skipped += 1
+            continue
+        files[rel] = text
+    _print(f"audit scanning {len(files)} files; skipped {skipped}")
+    return _scan_file_payloads(files, cfg, args)
+
+
+def _cmd_bootstrap(args: argparse.Namespace) -> int:
+    _print("checking dependencies")
+    doctor_args = argparse.Namespace(opf_bin="opf", gitleaks_bin="gitleaks", smoke=args.smoke, device=args.device, timeout=180)
+    code = _cmd_doctor(doctor_args)
+    if code != 0:
+        return code
+    if not args.no_init:
+        for path in [Path("git-shield.toml"), Path(".pii-allowlist")]:
+            if path.exists() and not args.force:
+                _print(f"exists: {path}")
+        if not args.dry_run:
+            try:
+                write_starter_files(Path("."), force=args.force)
+                _print("wrote starter config files")
+            except FileExistsError:
+                _print("starter config files already exist; use --force to overwrite")
+    if not args.no_install:
+        install_args = argparse.Namespace(global_install=True, device=args.device, force=args.force, dry_run=args.dry_run)
+        return _cmd_install(install_args)
     return 0
 
 
@@ -432,6 +584,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.cmd == "install":
         return _cmd_install(args)
+    if args.cmd == "bootstrap":
+        return _cmd_bootstrap(args)
+    if args.cmd == "audit":
+        return _cmd_audit(args)
+    if args.cmd == "status":
+        return _cmd_status(args)
     if args.cmd == "uninstall":
         return _cmd_uninstall(args)
     if args.cmd == "init":

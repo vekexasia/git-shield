@@ -54,6 +54,14 @@ Check the setup:
 
 ```bash
 git-shield doctor
+git-shield doctor --smoke
+```
+
+Or run the guided path:
+
+```bash
+git-shield bootstrap --smoke --dry-run
+git-shield bootstrap --smoke --force
 ```
 
 Install global hooks for all repos:
@@ -112,9 +120,13 @@ Why PII runs at pre-push instead of pre-commit:
 
 ```bash
 git-shield doctor                         # check dependencies
+git-shield doctor --smoke                 # run synthetic secret + PII smoke tests
+git-shield status --global                # show installed hooks and dependencies
+git-shield bootstrap --smoke --force      # doctor + init + global install
 git-shield init                           # write starter config and allowlist
 git-shield secrets --staged               # scan staged additions for secrets
 git-shield scan --base origin/main        # scan a diff range
+git-shield audit --all-files              # scan repo files, not just a diff
 git-shield scan --stdin --device cuda     # scan stdin
 git-shield install --global --force       # install global hooks
 git-shield uninstall --global             # remove global hooks installed by Git Shield
@@ -125,7 +137,10 @@ Subcommands:
 - `scan` - scan a ref range or stdin for secrets + PII.
 - `prepush` - Git pre-push hook entrypoint.
 - `secrets` - scan staged additions or stdin with gitleaks only.
-- `doctor` - verify external dependencies and print fix hints.
+- `doctor` - verify external dependencies and print fix hints; `--smoke` runs synthetic detection tests.
+- `status` - show hooks, dependencies, config, and allowlists.
+- `bootstrap` - run doctor, optionally initialize config, and install global hooks.
+- `audit` - scan repository files, not just Git diffs.
 - `init` - write starter `git-shield.toml` and `.pii-allowlist`.
 - `install` - write hooks locally or globally.
 - `uninstall` - remove hooks installed by Git Shield and restore backups when available.
