@@ -4,3 +4,8 @@
 (?i)^mario\.rossi@gmail\.com$
 (?i)^\+393392506412$
 (?i)^Mario Rossi$
+
+# Public documentation URLs
+(?i)^https://docs\.astral\.sh/uv/?$
+(?i)^https://github\.com/openai/privacy-filter/?$
+(?i)^https://github\.com/vekexasia/git-shield/?$

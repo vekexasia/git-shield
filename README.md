@@ -1,162 +1,144 @@
-# Privacy Pre-Push
+# Git Shield
 
-A local Git safety net for vibe coding: blocks API keys, secrets, and contextual PII before code leaves your machine.
+A local Git safety net for vibe coding. Git Shield blocks API keys, secrets, and contextual PII before code leaves your machine.
 
-Use it when AI-generated edits, quick experiments, copied logs, or test fixtures might accidentally include private data.
+It is meant for projects where AI-generated edits, copied logs, quick experiments, support snippets, or test fixtures can accidentally introduce sensitive data.
 
-The tool now combines:
+## What it does
 
-- `gitleaks` for API keys/secrets
-- OpenAI Privacy Filter for contextual PII in push diffs
-- optional fast regex/HF/GLiNER evaluation utilities for comparison
+- **Pre-commit:** scans staged additions with `gitleaks` and blocks API keys/secrets.
+- **Pre-push:** scans outgoing Git diffs with `gitleaks` and OpenAI Privacy Filter, then blocks contextual PII.
+- **Redacted output:** reports file paths, line numbers, and finding types without printing raw secrets or raw PII.
+- **Local-first:** scanning runs on your machine. No source code is sent to a hosted service by Git Shield.
+- **Global or per-repo:** install once for every repo, or only in a specific repo.
 
-## Current status
-
-Alpha. Model/backend evaluation notes are in [`MODEL_EVAL.md`](MODEL_EVAL.md).
-
-Subcommands (`scan` / `prepush` / `secrets` / `doctor` / `init` / `install` / `uninstall`) are wired,
-config + chunking + CUDA policy + binary/lockfile skip are in place, and the
-test suite covers the full pipeline with stubbed `opf`/`gitleaks`.
-
-Why pre-push instead of pre-commit?
-
-- OpenAI Privacy Filter is much heavier than regex/gitleaks.
-- Local benchmark on this machine:
-  - CPU: 19KB diff took ~2m22s, ~4.6GB RAM — too slow.
-  - CUDA: 19KB diff took ~2.2s, ~1.8GB host RAM — viable.
-- Therefore this should run as a heavier `pre-push` guard, ideally using CUDA.
-
-## Architecture
+Example output:
 
 ```text
-Git pre-commit hook
-  -> git-shield secrets --staged          # staged additions only
-      -> gitleaks stdin --redact               # blocks API keys/secrets
+[git-shield] gitleaks detected possible secrets in leak.txt. Operation blocked.
+[git-shield]   leak.txt: line 1: generic-api-key: OPENAI_API_KEY=REDACTED
 
-Git pre-push hook
-  -> git-shield prepush                   # parses <local-ref> <local-sha> <remote-ref> <remote-sha>
-      -> resolve base per ref                  # remote_sha | merge-base(origin/main, local) | fallback
-      -> git diff --unified=0 base..local      # tolerates missing refs (returns "")
-      -> drop ignored paths (*.lock, *.png, Binary files differ, ...)
-      -> extract added lines, prepend FILE: markers
-      -> gitleaks stdin --redact               # blocks API keys/secrets in push diff
-      -> CUDA policy gate                      # fail | skip | cpu-small
-      -> chunk by byte size (UTF-8 aware)
-      -> OpenAI Privacy Filter CLI (`opf`) per chunk
-      -> dedupe by raw text, allowlist public/test values
-      -> block push on private_email/private_phone/private_person/secret/...
+[git-shield] OpenAI Privacy Filter detected possible PII/secrets. Operation blocked.
+[git-shield]   customer.txt: line 12: private_email: [email:redacted]
+[git-shield]   customer.txt: line 12: private_person: [person:redacted]
 ```
 
-## Quick start
+## Quick install
 
-Install the tool globally:
+Requirements:
+
+- Python 3.11+
+- Git
+- [`uv`](https://docs.astral.sh/uv/)
+- `gitleaks` on `PATH`
+- `opf` from [openai/privacy-filter](https://github.com/openai/privacy-filter) on `PATH`
+- CUDA recommended for PII scanning
+
+Install Git Shield:
 
 ```bash
-git clone https://github.com/vekexasia/openai-git-shield
-cd openai-git-shield
+git clone https://github.com/vekexasia/git-shield
+cd git-shield
 uv tool install -e .
 ```
 
-Install dependencies used by the hooks:
+Install OpenAI Privacy Filter:
 
 ```bash
-# gitleaks must be on PATH for API-key/secret scanning.
-command -v gitleaks
-
-# OpenAI Privacy Filter is a separate dependency; model download is ~2.8GB on first run.
 git clone https://github.com/openai/privacy-filter ../privacy-filter
 uv tool install -e ../privacy-filter
-opf --device cuda 'Mario Rossi email mario.rossi@gmail.com'             # smoke test
+opf --device cuda 'Mario Rossi email mario.rossi@gmail.com'
 ```
 
-Check dependencies and install hooks:
+Check the setup:
 
 ```bash
 git-shield doctor
-git-shield init
+```
 
-# Preview changes:
+Install global hooks for all repos:
+
+```bash
 git-shield install --global --device cuda --dry-run
-
-# Global hooks for all repos:
 git-shield install --global --device cuda --force
+```
 
-# Or local hooks for only the current repo:
+Or install hooks only in the current repo:
+
+```bash
 git-shield install --device cuda --force
 ```
 
-Or, if you use the [`pre-commit`](https://pre-commit.com) framework, add to
-`.pre-commit-config.yaml` instead:
+## Copy-paste prompt for your coding agent
 
-```yaml
-repos:
-  - repo: https://github.com/vekexasia/openai-git-shield
-    rev: v0.1.0
-    hooks:
-      - id: git-shield-secrets
-        stages: [pre-commit]
-      - id: git-shield
-        stages: [pre-push]
+If you want an LLM coding agent to install this for you, paste this:
+
+```text
+Install Git Shield from https://github.com/vekexasia/git-shield.
+Use uv. Install the git-shield CLI with `uv tool install -e .` from the clone.
+Ensure `gitleaks` is available on PATH.
+Install OpenAI Privacy Filter from https://github.com/openai/privacy-filter with `uv tool install -e ../privacy-filter`.
+Run `opf --device cuda 'Mario Rossi email mario.rossi@gmail.com'` to download/smoke-test the model.
+Run `git-shield doctor`.
+If doctor passes, run `git-shield install --global --device cuda --dry-run`, then `git-shield install --global --device cuda --force`.
+Do not print any real secrets or PII in the chat.
 ```
 
-## Setup for development
+## How it works
 
-```bash
-git clone https://github.com/vekexasia/openai-git-shield
-cd openai-git-shield
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e '.[test]'
-pytest
+```text
+Git pre-commit hook
+  -> git-shield secrets --staged
+      -> gitleaks stdin --redact
+      -> blocks API keys/secrets in staged additions
+
+Git pre-push hook
+  -> git-shield prepush
+      -> resolves pushed refs and base commits
+      -> extracts added lines from outgoing diffs
+      -> skips ignored/binary/lock files
+      -> runs gitleaks first
+      -> runs OpenAI Privacy Filter on added text
+      -> blocks private_email/private_phone/private_person/secret/etc.
 ```
 
-The OPF model downloads to `~/.opf/privacy_filter` on first use (~2.8GB).
+Why PII runs at pre-push instead of pre-commit:
+
+- OPF is much heavier than regex/gitleaks.
+- Local benchmark on this machine: CPU was too slow, CUDA was viable.
+- Pre-push catches leaks before they leave your machine without slowing every commit.
 
 ## CLI
 
-Seven subcommands:
-
-- `git-shield scan` — diff a ref range or stdin, scan secrets + PII
-- `git-shield prepush` — read Git's pre-push stdin (`<local-ref> <local-sha> <remote-ref> <remote-sha>` per line) and scan each updated ref
-- `git-shield secrets` — scan staged additions or stdin with gitleaks only
-- `git-shield doctor` — verify required external dependencies and print fixes
-- `git-shield init` — write starter `git-shield.toml` and `.pii-allowlist`
-- `git-shield install` — write hooks locally or globally
-- `git-shield uninstall` — remove hooks installed by this tool and restore backups when available
-
-Examples:
-
 ```bash
-echo 'Mario Rossi mario.rossi@gmail.com' | git-shield scan --stdin --device cuda
-git-shield scan --base origin/main --head HEAD --device cuda
-git-shield scan --base origin/main --head HEAD --skip-if-no-opf
-git-shield doctor
-git-shield init
-git-shield install --global --device cuda --dry-run
-git-shield install --global --device cuda --force
-git-shield install --device cuda --force
-git-shield uninstall --global
+git-shield doctor                         # check dependencies
+git-shield init                           # write starter config and allowlist
+git-shield secrets --staged               # scan staged additions for secrets
+git-shield scan --base origin/main        # scan a diff range
+git-shield scan --stdin --device cuda     # scan stdin
+git-shield install --global --force       # install global hooks
+git-shield uninstall --global             # remove global hooks installed by Git Shield
 ```
 
-Common flags: `--config git-shield.toml`, `--max-bytes`, `--max-total-bytes`,
-`--labels private_email,private_phone`, `--cuda-policy {fail,skip,cpu-small}`,
-`--gitleaks-bin`, `--skip-secrets`, `--skip-if-no-gitleaks`.
+Subcommands:
 
-## Allowlist
+- `scan` - scan a ref range or stdin for secrets + PII.
+- `prepush` - Git pre-push hook entrypoint.
+- `secrets` - scan staged additions or stdin with gitleaks only.
+- `doctor` - verify external dependencies and print fix hints.
+- `init` - write starter `git-shield.toml` and `.pii-allowlist`.
+- `install` - write hooks locally or globally.
+- `uninstall` - remove hooks installed by Git Shield and restore backups when available.
 
-Allow public/test values with regexes in either:
+## Hook installation details
 
-- `~/.githooks/pii-allowlist.txt`
-- `.pii-allowlist` in the repository
-
-Keep allowlist entries narrow and explicit.
-
-## Hook installation
+Global install:
 
 ```bash
 git-shield install --global --device cuda --force
 ```
 
-Global install writes:
+Writes:
 
 ```text
 ~/.githooks/pre-commit -> git-shield secrets --staged
@@ -169,65 +151,153 @@ and sets:
 git config --global core.hooksPath ~/.githooks
 ```
 
-Local install writes `.git/hooks/pre-commit` and `.git/hooks/pre-push` for the
-current repo only. It refuses to overwrite without `--force`. When `--force`
-overwrites an existing different hook, the old hook is backed up as
-`pre-commit.bak.<timestamp>` or `pre-push.bak.<timestamp>`.
+Local install:
 
-Use `--dry-run` to preview hook paths. Use `git-shield uninstall` or
-`git-shield uninstall --global` to remove only hooks installed by this tool;
-it refuses to remove foreign hooks and restores the latest backup when available.
-
-The pre-push hook parses Git's pre-push stdin protocol and resolves a sensible
-base for new branches via `git merge-base`.
-
-Hook findings include file paths and line numbers when scanning Git diffs:
-
-```text
-[git-shield]   leak.txt: line 1: generic-api-key: OPENAI_API_KEY=REDACTED
-[git-shield]   customer.txt: line 1: private_email: g***i@gmail.com
+```bash
+git-shield install --device cuda --force
 ```
 
-## Replicability
+Writes:
 
-This repo is designed to drop into any environment without local patching:
+```text
+.git/hooks/pre-commit
+.git/hooks/pre-push
+```
 
-- No machine-specific paths in source, README, or tests.
-- All defaults live in [`src/git_shield/config.py`](src/git_shield/config.py); per-repo overrides go in `git-shield.toml` (see `examples/`).
-- Two adoption paths, pick whichever your team already uses:
-  - **Raw Git hook** — `git-shield install` writes hooks directly.
-  - **`pre-commit` framework** — declare it in `.pre-commit-config.yaml` (uses `.pre-commit-hooks.yaml` shipped here).
-- OPF and gitleaks are external dependencies and are installed separately so this repo stays small/cloneable.
-- Tests run fully offline against stubbed `opf`/`gitleaks` and never touch the host's `~/.githooks` or repo `.pii-allowlist` (see `tests/test_cli.py` fixture).
+Safety behavior:
 
-Drop-in artefacts:
+- Without `--force`, existing hooks are never overwritten.
+- With `--force`, different existing hooks are backed up as `pre-commit.bak.<timestamp>` or `pre-push.bak.<timestamp>`.
+- `git-shield uninstall` refuses to remove hooks it did not install.
+- `git-shield uninstall` restores the latest backup when available.
 
-- [`examples/git-shield.toml`](examples/git-shield.toml) — fully-commented config schema.
-- [`examples/.pii-allowlist`](examples/.pii-allowlist) — minimal public/test allowlist starter.
-- [`.pre-commit-hooks.yaml`](.pre-commit-hooks.yaml) — pre-commit framework hook definition.
+## Configuration
 
-## Config file (`git-shield.toml`)
+Create starter files:
+
+```bash
+git-shield init
+```
+
+Example `git-shield.toml`:
 
 ```toml
 [git_shield]
 device = "cuda"
-cuda_policy = "cpu-small"        # fail | skip | cpu-small
+cuda_policy = "cpu-small" # fail | skip | cpu-small
 cpu_small_threshold = 16384
+opf_bin = "opf"
+gitleaks_bin = "gitleaks"
+timeout_seconds = 180
 max_bytes_per_chunk = 65536
 max_total_bytes = 2097152
 labels = ["private_email", "private_phone", "private_person", "secret"]
-ignore_globs = ["*.lock", "*.png", "vendor/*"]
+ignore_globs = ["*.lock", "*.png", "vendor/*", "tests/fixtures/*"]
 allowlist_paths = [".pii-allowlist"]
 ```
 
-## Operational notes
+Allow public/test values with narrow regexes in:
 
-- Raw PII and secrets should not be printed. Secrets are redacted by gitleaks;
-  PII is redacted by this tool before logging.
-- OPF chunks are scanned through temporary files because OPF treats stdin as
-  line-delimited inputs. Temp files are created with Python's private tempfile
-  defaults and removed when the scan completes.
-- Bypass hooks only when necessary:
-  - `git commit --no-verify`
-  - `git push --no-verify`
-- Add narrow public/test allowlist regexes instead of broad suppressions.
+- `~/.githooks/pii-allowlist.txt`
+- `.pii-allowlist`
+- extra paths configured in `git-shield.toml`
+
+Example `.pii-allowlist`:
+
+```text
+(?i)^support@example\.com$
+(?i)^user\d+@test\.com$
+(?i)^git@github\.com$
+```
+
+## pre-commit framework usage
+
+Raw Git hooks are the recommended install path because OPF and gitleaks are external dependencies.
+
+If you still want to use the pre-commit framework:
+
+```yaml
+repos:
+  - repo: https://github.com/vekexasia/git-shield
+    rev: v0.1.0
+    hooks:
+      - id: git-shield-secrets
+        stages: [pre-commit]
+      - id: git-shield
+        stages: [pre-push]
+```
+
+Make sure `gitleaks` and `opf` are available on `PATH` before using these hooks.
+
+## What it catches
+
+Secrets via gitleaks:
+
+- API keys
+- tokens
+- credentials
+- private keys
+- many common provider-specific secret formats
+
+PII via OpenAI Privacy Filter:
+
+- `private_email`
+- `private_phone`
+- `private_person`
+- `private_address`
+- `private_url`
+- `private_date`
+- `account_number`
+- `secret`
+
+## What it does not guarantee
+
+Git Shield is a guardrail, not a compliance product.
+
+- It can miss sensitive data.
+- It can false-positive on fixtures or public contact information.
+- It only scans what Git exposes in staged additions or outgoing diffs.
+- New branch base resolution depends on available local refs.
+- You can bypass hooks with Git's `--no-verify`.
+
+## Bypass and recovery
+
+Bypass only when you know the finding is safe:
+
+```bash
+git commit --no-verify
+git push --no-verify
+```
+
+Prefer allowlisting narrow public/test values instead of broad skips.
+
+Remove hooks installed by Git Shield:
+
+```bash
+git-shield uninstall --global
+git-shield uninstall
+```
+
+## Development
+
+```bash
+git clone https://github.com/vekexasia/git-shield
+cd git-shield
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[test]'
+pytest
+uv build
+```
+
+Model/backend evaluation notes are in [`MODEL_EVAL.md`](MODEL_EVAL.md).
+
+## Security notes
+
+- Hook output is printed to stderr and is visible in normal Git command output.
+- Secrets are redacted by gitleaks before display.
+- PII is redacted by Git Shield before display.
+- OPF chunks are scanned through temporary files because OPF treats stdin as line-delimited inputs. Temp files use Python's private tempfile defaults and are removed when scanning completes.
+- Do not put real secrets or real PII in issues, tests, fixtures, or chat logs.
+
+If you find a path that prints raw sensitive values, report it as a security bug. See [`SECURITY.md`](SECURITY.md).
