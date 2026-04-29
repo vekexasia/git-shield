@@ -5,6 +5,7 @@ from pathlib import Path
 CONFIG_TEMPLATE = """[git_shield]
 device = "cuda"
 cuda_policy = "cpu-small" # fail | skip | cpu-small
+backend = "opf"            # opf | gliner
 cpu_small_threshold = 16384
 opf_bin = "opf"
 gitleaks_bin = "gitleaks"
@@ -21,6 +22,7 @@ ignore_globs = [
   "*.gif",
   "*.webp",
   "*.pdf",
+  ".pii-allowlist",
   "package-lock.json",
   "yarn.lock",
   "pnpm-lock.yaml",

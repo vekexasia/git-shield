@@ -9,3 +9,12 @@
 (?i)^https://docs\.astral\.sh/uv/?$
 (?i)^https://github\.com/openai/privacy-filter/?$
 (?i)^https://github\.com/vekexasia/git-shield/?$
+(?i)^private\.person@corp\.invalid$
+(?i)\+393392506412
+(?i)^https://github\.com/vekexasia/git-shield/actions.*$
+(?i)^https://img\.shields\.io/.*$
+(?i)^https://www\.python\.org/?$
+(?i)^https://github\.com/gitleaks/gitleaks.*$
+(?i)^https://github\.com/urchade/GLiNER/?$
+(?i)^sensitive\.person@corp\.invalid$
+(?i)^https://example\.com/?$

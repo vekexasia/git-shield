@@ -7,6 +7,7 @@ from git_shield.opf import (
     OpfError,
     detect_chunks,
     parse_opf_json,
+    parse_opf_json_many,
 )
 
 
@@ -31,6 +32,17 @@ def test_parse_opf_json_handles_brace_inside_string_value():
     findings = parse_opf_json(output)
     assert findings[0].text == "val {x}"
 
+
+
+def test_parse_opf_json_many_handles_concatenated_payloads():
+    output = (
+        '{"detected_spans":[{"label":"private_email","text":"a@b.com"}]}'
+        '{"detected_spans":[{"label":"private_person","text":"Mario Rossi"}]}'
+    )
+    batches = parse_opf_json_many(output)
+    assert len(batches) == 2
+    assert batches[0][0].label == "private_email"
+    assert batches[1][0].label == "private_person"
 
 def test_parse_opf_json_no_json_raises():
     with pytest.raises(ValueError):
@@ -76,6 +88,29 @@ def test_detector_parses_valid_output():
     assert "-f" in calls[0][0][0]
     assert "Mario Rossi" not in calls[0][0][0]
 
+
+
+def test_detector_detect_many_batches_files():
+    calls = []
+
+    def runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"detected_spans":[{"label":"private_email","text":"a@b.com"}]}'
+                '{"detected_spans":[{"label":"private_person","text":"Mario Rossi"}]}'
+            ),
+            stderr="",
+        )
+
+    det = OpenAIPrivacyFilterDetector(runner=runner)
+    batches = det.detect_many(["a@b.com", "Mario Rossi"])
+    assert len(batches) == 2
+    assert batches[0][0].label == "private_email"
+    assert batches[1][0].label == "private_person"
+    cmd = calls[0][0][0]
+    assert cmd.count("-f") == 2
 
 def test_detect_chunks_aggregates():
     class FakeDetector:

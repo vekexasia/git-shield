@@ -39,6 +39,14 @@ def collect_checks(opf_bin: str = "opf", gitleaks_bin: str = "gitleaks") -> list
 
     cuda = has_cuda()
     checks.append(Check("cuda", cuda, "available" if cuda else "not available", required=False))
+
+    try:
+        import importlib
+        gliner = importlib.import_module("gliner")
+        checks.append(Check("gliner", True, "installed", required=False))
+    except ImportError:
+        checks.append(Check("gliner", False, "not installed (optional, install with: pip install gliner)", required=False))
+
     return checks
 
 

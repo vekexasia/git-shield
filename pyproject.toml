@@ -13,9 +13,11 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",  # WSL only, native Windows not supported
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Version Control :: Git",
   "Topic :: Security",
 ]
@@ -25,8 +27,10 @@ dependencies = []
 opf = [
   # Installed separately from https://github.com/openai/privacy-filter for now.
 ]
-test = [
+dev = [
   "pytest>=8",
+  "mypy>=1.10",
+  "build>=1.2",
 ]
 
 [project.scripts]
@@ -61,3 +65,10 @@ include = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false

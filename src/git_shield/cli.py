@@ -1,46 +1,19 @@
+"""Git Shield CLI -- thin dispatcher over command modules."""
+
 from __future__ import annotations
 
 import argparse
-import fnmatch
-import json
-import shutil
-import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
-from .allowlist import load_patterns
-from .chunking import chunk_text, chunk_text_offsets
+from . import __version__
 from .config import Config, load_config
-from .cuda import has_cuda, resolve_device
-from .diff import (
-    added_text,
-    added_text_by_file,
-    diff_with_fallback,
-    parse_file_changes,
-    show_blob,
-    staged_diff,
-)
-from .doctor import checks_ok, collect_checks, fix_hint
-from .init_config import write_starter_files
-from .install import install_global_hook, install_hook, uninstall_global_hook, uninstall_hook
-from .opf import OpenAIPrivacyFilterDetector, OpfError, PrivacyFinding, detect_chunks
-from .prepush import parse_prepush_stdin, resolve_base
-from .scanner import filter_findings
-from .secrets import SecretScanError, scan_secrets_with_gitleaks
-
-
-@dataclass(frozen=True)
-class FilePayload:
-    secret_text: str
-    pii_text: str
-    # File line numbers in `pii_text` that count as "added" for PII purposes.
-    # None means scan every line (audit mode or fallback when post-image is unavailable).
-    added_lines: frozenset[int] | None
+from .output import set_verbosity
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--device", default=None, help="OPF device (default: from config or 'cuda')")
+    p.add_argument("--backend", default=None, choices=["opf", "gliner"], help="PII detection backend (default: opf)")
     p.add_argument("--opf-bin", default=None)
     p.add_argument("--gitleaks-bin", default=None)
     p.add_argument("--timeout", type=int, default=None)
@@ -53,10 +26,15 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cuda-policy", default=None, choices=["fail", "skip", "cpu-small"])
     p.add_argument("--skip-secrets", action="store_true", help="do not run gitleaks secret scanning")
     p.add_argument("--skip-if-no-gitleaks", action="store_true")
+    p.add_argument("--json", action="store_true", help="write machine-readable JSON to stdout")
+    p.add_argument("--no-cache", action="store_true", help="bypass scan result cache")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="git-shield", description="Pre-push PII guard")
+    parser.add_argument("--version", action="version", version=f"git-shield {__version__}")
+    parser.add_argument("-q", "--quiet", action="store_true", help="suppress non-error output")
+    parser.add_argument("-v", "--verbose", action="store_true", help="show extra diagnostic output")
     sub = parser.add_subparsers(dest="cmd")
 
     scan = sub.add_parser("scan", help="scan a ref range or stdin")
@@ -77,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     sec.add_argument("--gitleaks-bin", default="gitleaks")
     sec.add_argument("--timeout", type=int, default=120)
     sec.add_argument("--skip-if-no-gitleaks", action="store_true")
+    sec.add_argument("--json", action="store_true", help="write machine-readable JSON to stdout")
 
     doctor = sub.add_parser("doctor", help="check external dependencies and runtime prerequisites")
     doctor.add_argument("--opf-bin", default="opf")
@@ -85,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--device", default="cuda")
     doctor.add_argument("--timeout", type=int, default=180)
     doctor.add_argument("--json", action="store_true", help="write machine-readable JSON to stdout")
+    doctor.add_argument("--install", action="store_true", help="auto-install missing dependencies (gitleaks, opf)")
 
     status = sub.add_parser("status", help="show installed hooks, config, allowlists, and dependencies")
     status.add_argument("--repo", default=Path("."), type=Path)
@@ -104,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     boot.add_argument("--no-install", action="store_true")
     boot.add_argument("--dry-run", action="store_true")
     boot.add_argument("--smoke", action="store_true")
+    boot.add_argument("--install-deps", action="store_true", help="auto-install missing dependencies (gitleaks, opf)")
 
     init = sub.add_parser("init", help="write starter config and allowlist files")
     init.add_argument("--repo", default=Path("."), type=Path)
@@ -127,6 +108,7 @@ def _effective_config(args: argparse.Namespace) -> Config:
     cfg = load_config(args.config) if getattr(args, "config", None) else Config()
     return Config(
         device=args.device or cfg.device,
+        backend=args.backend or cfg.backend,
         opf_bin=args.opf_bin or cfg.opf_bin,
         gitleaks_bin=args.gitleaks_bin or cfg.gitleaks_bin,
         timeout_seconds=args.timeout or cfg.timeout_seconds,
@@ -140,578 +122,56 @@ def _effective_config(args: argparse.Namespace) -> Config:
     )
 
 
-def _print(msg: str) -> None:
-    print(f"[git-shield] {msg}", file=sys.stderr)
-
-
-def _scan_secrets_payload(text: str, gitleaks_bin: str, timeout_seconds: int, skip_if_missing: bool) -> int:
-    if not text.strip():
-        _print("No added text to scan for secrets.")
-        return 0
-    try:
-        result = scan_secrets_with_gitleaks(text, gitleaks_bin, timeout_seconds)
-    except FileNotFoundError:
-        msg = f"gitleaks executable not found: {gitleaks_bin}"
-        if skip_if_missing:
-            _print(msg + " — skipping")
-            return 0
-        _print(msg)
-        _print("Install gitleaks or pass --skip-if-no-gitleaks.")
-        return 1
-    except SecretScanError as exc:
-        _print(f"gitleaks failed: {exc}")
-        return 1
-
-    if not result.found:
-        _print("No gitleaks secret findings.")
-        return 0
-
-    _print("gitleaks detected possible secrets. Operation blocked.")
-    if result.findings:
-        for finding in result.findings[:20]:
-            where = f"line {finding.line}" if finding.line is not None else "line unknown"
-            match = f": {finding.match}" if finding.match else ""
-            _print(f"  <stdin>: {where}: {finding.rule_id}{match}")
-    elif result.output:
-        for line in result.output.splitlines()[-20:]:
-            _print(f"  {line}")
-    return 1
-
-
-def _scan_secret_files(files: dict[str, str], cfg: Config, args: argparse.Namespace) -> int:
-    if getattr(args, "skip_secrets", False):
-        return 0
-    blocked = False
-    missing = False
-    failed = False
-    for path, text in files.items():
-        if not text.strip():
-            continue
-        try:
-            result = scan_secrets_with_gitleaks(text, cfg.gitleaks_bin, cfg.timeout_seconds)
-        except FileNotFoundError:
-            missing = True
-            break
-        except SecretScanError as exc:
-            _print(f"gitleaks failed while scanning {path}: {exc}")
-            failed = True
-            continue
-        if result.found:
-            blocked = True
-            _print(f"gitleaks detected possible secrets in {path}. Operation blocked.")
-            if result.findings:
-                for finding in result.findings[:20]:
-                    where = f"line {finding.line}" if finding.line is not None else "line unknown"
-                    match = f": {finding.match}" if finding.match else ""
-                    _print(f"  {path}: {where}: {finding.rule_id}{match}")
-            elif result.output:
-                for line in result.output.splitlines()[-10:]:
-                    _print(f"  {line}")
-    if missing:
-        msg = f"gitleaks executable not found: {cfg.gitleaks_bin}"
-        if args.skip_if_no_gitleaks:
-            _print(msg + " — skipping")
-            return 0
-        _print(msg)
-        _print("Install gitleaks or pass --skip-if-no-gitleaks.")
-        return 1
-    if blocked or failed:
-        return 1
-    _print("No gitleaks secret findings.")
-    return 0
-
-
-def _scan_pii_files(payloads: dict[str, FilePayload], cfg: Config, args: argparse.Namespace) -> int:
-    payloads = {p: pl for p, pl in payloads.items() if pl.pii_text.strip()}
-    if not payloads:
-        _print("No added text to scan for PII.")
-        return 0
-
-    total_bytes = sum(len(pl.pii_text.encode("utf-8")) for pl in payloads.values())
-    if total_bytes > cfg.max_total_bytes:
-        _print(f"Diff is {total_bytes} bytes (> {cfg.max_total_bytes}); refuse to scan.")
-        return 1
-
-    device, reason = resolve_device(
-        cfg.device, cfg.cuda_policy, total_bytes, cfg.cpu_small_threshold, has_cuda()
-    )
-    if device is None:
-        _print(f"CUDA unavailable, policy='{cfg.cuda_policy}' -> skipping ({reason}).")
-        return 0
-    if reason != "ok":
-        _print(f"Device decision: {device} ({reason}).")
-
-    if shutil.which(cfg.opf_bin) is None:
-        msg = f"OPF executable not found: {cfg.opf_bin}"
-        if args.skip_if_no_opf:
-            _print(msg + " — skipping")
-            return 0
-        _print(msg)
-        _print("Install OpenAI Privacy Filter: pip install -e /path/to/openai/privacy-filter")
-        return 1
-
-    detector = OpenAIPrivacyFilterDetector(cfg.opf_bin, device, cfg.timeout_seconds)
-    allow_paths = [
-        Path.home() / ".githooks" / "pii-allowlist.txt",
-        Path(".pii-allowlist"),
-        *cfg.allowlist_paths,
-        *args.allowlist,
-    ]
-    allow_patterns = load_patterns(allow_paths)
-    findings_by_file = []
-    for path, payload in payloads.items():
-        raw_findings: list[PrivacyFinding] = []
-        for offset, chunk in chunk_text_offsets(payload.pii_text, cfg.max_bytes_per_chunk):
-            try:
-                chunk_findings = detector.detect(chunk)
-            except OpfError as exc:
-                _print(f"OPF failed while scanning {path}: {exc}")
-                return 1
-            for finding in chunk_findings:
-                start = offset + finding.start if finding.start is not None else None
-                end = offset + finding.end if finding.end is not None else None
-                raw_findings.append(PrivacyFinding(finding.label, finding.text, start, end))
-        for finding in filter_findings(raw_findings, allow_patterns, set(cfg.labels), source_text=payload.pii_text):
-            if payload.added_lines is not None and (finding.line is None or finding.line not in payload.added_lines):
-                # Pre-existing data on an untouched line — not introduced by this push.
-                continue
-            findings_by_file.append((path, finding))
-
-    if not findings_by_file:
-        _print("No OPF PII findings.")
-        return 0
-
-    _print("OpenAI Privacy Filter detected possible PII/secrets. Operation blocked.")
-    for path, finding in findings_by_file[:50]:
-        where = f"line {finding.line}" if finding.line is not None else "line unknown"
-        _print(f"  {path}: {where}: {finding.label}: {finding.redacted}")
-    if len(findings_by_file) > 50:
-        _print(f"  ... and {len(findings_by_file) - 50} more")
-    _print("Add narrow public/test allowlist regexes or remove the data.")
-    return 1
-
-
-def _scan_file_payloads(payloads: dict[str, FilePayload], cfg: Config, args: argparse.Namespace) -> int:
-    payloads = {
-        path: pl for path, pl in payloads.items()
-        if pl.secret_text.strip() or pl.pii_text.strip()
-    }
-    if not payloads:
-        _print("No added text to scan.")
-        return 0
-    secret_files = {path: pl.secret_text for path, pl in payloads.items() if pl.secret_text.strip()}
-    code = _scan_secret_files(secret_files, cfg, args) if secret_files else 0
-    if code != 0:
-        return code
-    return _scan_pii_files(payloads, cfg, args)
-
-
-def _payloads_from_changes(
-    changes: dict,
-    head_ref: str | None,
-    cwd: str | None = None,
-) -> dict[str, FilePayload]:
-    """Build per-file payloads from a parsed diff.
-
-    For PII context we fetch the post-image (`git show <head_ref>:<path>`) so the
-    detector sees the file as it lands. If unavailable (new untracked file, ref
-    missing, binary), we fall back to the synthesized added-text blob and scan
-    every line of it (no line-set filter).
-    """
-    out: dict[str, FilePayload] = {}
-    for path, change in changes.items():
-        full = show_blob(head_ref, path, cwd=cwd) if head_ref else None
-        if full is not None and full.strip():
-            out[path] = FilePayload(
-                secret_text=change.added_text,
-                pii_text=full,
-                added_lines=change.added_lines or None,
-            )
-        else:
-            out[path] = FilePayload(
-                secret_text=change.added_text,
-                pii_text=change.added_text,
-                added_lines=None,
-            )
-    return out
-
-
-def _scan_payload(text: str, cfg: Config, args: argparse.Namespace) -> int:
-    if not text.strip():
-        _print("No added text to scan.")
-        return 0
-
-    if not args.skip_secrets:
-        code = _scan_secrets_payload(
-            text,
-            cfg.gitleaks_bin,
-            cfg.timeout_seconds,
-            args.skip_if_no_gitleaks,
-        )
-        if code != 0:
-            return code
-
-    total_bytes = len(text.encode("utf-8"))
-    if total_bytes > cfg.max_total_bytes:
-        _print(f"Diff is {total_bytes} bytes (> {cfg.max_total_bytes}); refuse to scan.")
-        return 1
-
-    device, reason = resolve_device(
-        cfg.device, cfg.cuda_policy, total_bytes, cfg.cpu_small_threshold, has_cuda()
-    )
-    if device is None:
-        _print(f"CUDA unavailable, policy='{cfg.cuda_policy}' -> skipping ({reason}).")
-        return 0
-    if reason != "ok":
-        _print(f"Device decision: {device} ({reason}).")
-
-    if shutil.which(cfg.opf_bin) is None:
-        msg = f"OPF executable not found: {cfg.opf_bin}"
-        if args.skip_if_no_opf:
-            _print(msg + " — skipping")
-            return 0
-        _print(msg)
-        _print("Install OpenAI Privacy Filter: pip install -e /path/to/openai/privacy-filter")
-        return 1
-
-    detector = OpenAIPrivacyFilterDetector(cfg.opf_bin, device, cfg.timeout_seconds)
-    allow_paths = [
-        Path.home() / ".githooks" / "pii-allowlist.txt",
-        Path(".pii-allowlist"),
-        *cfg.allowlist_paths,
-        *args.allowlist,
-    ]
-    chunks = chunk_text(text, cfg.max_bytes_per_chunk)
-    try:
-        raw_findings = detect_chunks(detector, chunks)
-    except OpfError as exc:
-        _print(f"OPF failed: {exc}")
-        return 1
-
-    findings = filter_findings(raw_findings, load_patterns(allow_paths), set(cfg.labels))
-    if not findings:
-        _print("No OPF PII findings.")
-        return 0
-
-    _print("OpenAI Privacy Filter detected possible PII/secrets. Operation blocked.")
-    for f in findings[:50]:
-        _print(f"  {f.label}: {f.redacted}")
-    if len(findings) > 50:
-        _print(f"  ... and {len(findings) - 50} more")
-    _print("Add narrow public/test allowlist regexes or remove the data.")
-    return 1
-
-
-def _cmd_scan(args: argparse.Namespace) -> int:
-    cfg = _effective_config(args)
-    if args.stdin:
-        return _scan_payload(sys.stdin.read(), cfg, args)
-    diff = diff_with_fallback(args.base, args.head)
-    changes = parse_file_changes(diff, cfg.ignore_globs)
-    payloads = _payloads_from_changes(changes, head_ref=args.head)
-    return _scan_file_payloads(payloads, cfg, args)
-
-
-def _cmd_prepush(args: argparse.Namespace) -> int:
-    cfg = _effective_config(args)
-    refs = parse_prepush_stdin(sys.stdin.read())
-    if not refs:
-        _print("No refs on stdin; nothing to scan.")
-        return 0
-
-    payloads: dict[str, FilePayload] = {}
-    for ref in refs:
-        base = resolve_base(ref, fallback=args.fallback_base)
-        if base is None:
-            continue
-        diff = diff_with_fallback(base, ref.local_sha)
-        changes = parse_file_changes(diff, cfg.ignore_globs)
-        for path, payload in _payloads_from_changes(changes, head_ref=ref.local_sha).items():
-            existing = payloads.get(path)
-            if existing is None:
-                payloads[path] = payload
-                continue
-            # Multiple refs touched the same path — merge added-lines and prefer
-            # the richer post-image (full file) over a fallback added-text blob.
-            if payload.added_lines is None or existing.added_lines is None:
-                merged_lines = None
-            else:
-                merged_lines = existing.added_lines | payload.added_lines
-            merged_secret = "\n".join(part for part in [existing.secret_text, payload.secret_text] if part)
-            merged_pii = payload.pii_text if payload.added_lines is not None else existing.pii_text
-            payloads[path] = FilePayload(
-                secret_text=merged_secret,
-                pii_text=merged_pii,
-                added_lines=merged_lines,
-            )
-    return _scan_file_payloads(payloads, cfg, args)
-
-
-def _cmd_secrets(args: argparse.Namespace) -> int:
-    if args.stdin:
-        return _scan_secrets_payload(sys.stdin.read(), args.gitleaks_bin, args.timeout, args.skip_if_no_gitleaks)
-    cfg = Config(gitleaks_bin=args.gitleaks_bin, timeout_seconds=args.timeout)
-    files = added_text_by_file(staged_diff())
-    return _scan_secret_files(files, cfg, args)
-
-
-def _cmd_doctor(args: argparse.Namespace) -> int:
-    checks = collect_checks(args.opf_bin, args.gitleaks_bin)
-    smoke = None
-    if args.smoke and checks_ok(checks):
-        smoke_code = _cmd_smoke(args.gitleaks_bin, args.opf_bin, args.device, args.timeout, quiet=args.json)
-        smoke = {"ok": smoke_code == 0}
-    if args.json:
-        payload = {
-            "ok": checks_ok(checks) and (smoke is None or smoke["ok"]),
-            "checks": [
-                {
-                    "name": check.name,
-                    "ok": check.ok,
-                    "required": check.required,
-                    "detail": check.detail,
-                    "fix": fix_hint(check),
-                }
-                for check in checks
-            ],
-            "smoke": smoke,
-        }
-        print(json.dumps(payload, indent=2))
-        return 0 if payload["ok"] else 1
-    for check in checks:
-        status = "ok" if check.ok else ("missing" if check.required else "warn")
-        _print(f"{status}: {check.name}: {check.detail}")
-        hint = fix_hint(check)
-        if hint:
-            _print(f"  fix: {hint}")
-    if not checks_ok(checks):
-        _print("Install missing required dependencies before enabling hooks.")
-        return 1
-    if args.smoke:
-        return 0 if smoke and smoke["ok"] else 1
-    return 0
-
-
-def _cmd_smoke(gitleaks_bin: str, opf_bin: str, device: str, timeout: int, quiet: bool = False) -> int:
-    def say(msg: str) -> None:
-        if not quiet:
-            _print(msg)
-
-    try:
-        synthetic_key = "OPENAI" + "_API_KEY=" + "sk-" + "1234567890abcdef" * 3 + "\n"
-        secret = scan_secrets_with_gitleaks(synthetic_key, gitleaks_bin, timeout)
-    except (FileNotFoundError, SecretScanError) as exc:
-        say(f"secret smoke failed: {exc}")
-        return 1
-    if not secret.found:
-        say("secret smoke failed: gitleaks did not flag synthetic key")
-        return 1
-    say("ok: secret smoke detected synthetic key with redacted output")
-
-    detector = OpenAIPrivacyFilterDetector(opf_bin, device, timeout)
-    try:
-        synthetic_person = "".join(chr(c) for c in [71, 105, 117, 115, 101, 112, 112, 101, 32, 86, 101, 114, 100, 105])
-        synthetic_email = "".join(chr(c) for c in [103, 105, 117, 115, 101, 112, 112, 101, 46, 118, 101, 114, 100, 105, 64, 103, 109, 97, 105, 108, 46, 99, 111, 109])
-        findings = filter_findings(
-            detector.detect(f"{synthetic_person} email {synthetic_email}"),
-            load_patterns(),
-        )
-    except OpfError as exc:
-        say(f"PII smoke failed: {exc}")
-        return 1
-    labels = {finding.label for finding in findings}
-    if "private_email" not in labels:
-        say("PII smoke failed: OPF did not flag synthetic email")
-        return 1
-    say("ok: PII smoke detected synthetic email/person with redacted output")
-    return 0
-
-
-def _hook_status(path: Path) -> str:
-    if not path.exists():
-        return "missing"
-    text = path.read_text(errors="replace")
-    if "Installed by git-shield" in text:
-        return "installed"
-    return "foreign"
-
-
-def _cmd_status(args: argparse.Namespace) -> int:
-    checks = collect_checks()
-    root = Path.home() / ".githooks" if args.global_status else args.repo / ".git" / "hooks"
-    cfg = args.repo / "git-shield.toml"
-    allow = args.repo / ".pii-allowlist"
-    payload = {
-        "checks": [
-            {"name": check.name, "ok": check.ok, "required": check.required, "detail": check.detail}
-            for check in checks
-        ],
-        "hook_dir": str(root),
-        "hooks": {
-            "pre-commit": _hook_status(root / "pre-commit"),
-            "pre-push": _hook_status(root / "pre-push"),
-        },
-        "config": str(cfg) if cfg.exists() else None,
-        "allowlist": str(allow) if allow.exists() else None,
-    }
-    if args.json:
-        print(json.dumps(payload, indent=2))
-        return 0
-    for check in checks:
-        status = "ok" if check.ok else ("missing" if check.required else "warn")
-        _print(f"{status}: {check.name}: {check.detail}")
-    _print(f"hook dir: {root}")
-    _print(f"pre-commit: {payload['hooks']['pre-commit']}")
-    _print(f"pre-push: {payload['hooks']['pre-push']}")
-    _print(f"config: {payload['config'] or 'not found'}")
-    _print(f"allowlist: {payload['allowlist'] or 'not found'}")
-    return 0
-
-
-def _cmd_init(args: argparse.Namespace) -> int:
-    try:
-        written = write_starter_files(args.repo, force=args.force)
-    except FileExistsError as exc:
-        _print(str(exc))
-        return 1
-    for path in written:
-        _print(f"Wrote {path}")
-    return 0
-
-
-def _repo_files(repo: Path, all_files: bool) -> list[str]:
-    args = ["git", "ls-files"]
-    if all_files:
-        args.extend(["--cached", "--others", "--exclude-standard"])
-    proc = subprocess.run(args, cwd=repo, text=True, capture_output=True, check=False)
-    if proc.returncode != 0:
-        raise FileNotFoundError("not a git repo or git ls-files failed")
-    return [line for line in proc.stdout.splitlines() if line]
-
-
-def _ignored_path(path: str, ignore_globs: tuple[str, ...]) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    return any(fnmatch.fnmatch(path, glob) or fnmatch.fnmatch(name, glob) for glob in ignore_globs)
-
-
-def _cmd_audit(args: argparse.Namespace) -> int:
-    cfg = _effective_config(args)
-    try:
-        paths = _repo_files(args.repo, args.all_files)
-    except FileNotFoundError as exc:
-        _print(str(exc))
-        return 1
-    payloads: dict[str, FilePayload] = {}
-    skipped = 0
-    for rel in paths:
-        if _ignored_path(rel, cfg.ignore_globs):
-            skipped += 1
-            continue
-        path = args.repo / rel
-        try:
-            if path.stat().st_size > args.max_file_bytes:
-                skipped += 1
-                continue
-            text = path.read_text(errors="ignore")
-        except OSError:
-            skipped += 1
-            continue
-        if "\0" in text:
-            skipped += 1
-            continue
-        payloads[rel] = FilePayload(secret_text=text, pii_text=text, added_lines=None)
-    _print(f"audit scanning {len(payloads)} files; skipped {skipped}")
-    return _scan_file_payloads(payloads, cfg, args)
-
-
-def _cmd_bootstrap(args: argparse.Namespace) -> int:
-    _print("checking dependencies")
-    doctor_args = argparse.Namespace(opf_bin="opf", gitleaks_bin="gitleaks", smoke=args.smoke, device=args.device, timeout=180)
-    code = _cmd_doctor(doctor_args)
-    if code != 0:
-        return code
-    if not args.no_init:
-        for path in [Path("git-shield.toml"), Path(".pii-allowlist")]:
-            if path.exists() and not args.force:
-                _print(f"exists: {path}")
-        if not args.dry_run:
-            try:
-                write_starter_files(Path("."), force=args.force)
-                _print("wrote starter config files")
-            except FileExistsError:
-                _print("starter config files already exist; use --force to overwrite")
-    if not args.no_install:
-        install_args = argparse.Namespace(global_install=True, device=args.device, force=args.force, dry_run=args.dry_run)
-        return _cmd_install(install_args)
-    return 0
-
-
-def _cmd_install(args: argparse.Namespace) -> int:
-    if args.dry_run:
-        if args.global_install:
-            root = Path.home() / ".githooks"
-            _print(f"Would write {root / 'pre-commit'}")
-            _print(f"Would write {root / 'pre-push'}")
-            _print(f"Would set git config --global core.hooksPath {root}")
-        else:
-            root = args.repo / ".git" / "hooks"
-            _print(f"Would write {root / 'pre-commit'}")
-            _print(f"Would write {root / 'pre-push'}")
-        return 0
-    try:
-        if args.global_install:
-            path = install_global_hook(device=args.device, force=args.force)
-        else:
-            path = install_hook(args.repo, device=args.device, force=args.force)
-    except (FileExistsError, FileNotFoundError) as exc:
-        _print(str(exc))
-        return 1
-    _print(f"Installed hooks; pre-push hook at {path}")
-    return 0
-
-
-def _cmd_uninstall(args: argparse.Namespace) -> int:
-    try:
-        if args.global_install:
-            changed = uninstall_global_hook(restore=not args.no_restore)
-        else:
-            changed = uninstall_hook(args.repo, restore=not args.no_restore)
-    except (FileExistsError, FileNotFoundError) as exc:
-        _print(str(exc))
-        return 1
-    if not changed:
-        _print("No git-shield hooks found.")
-        return 0
-    for path in changed:
-        _print(f"Updated {path}")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    set_verbosity(
+        quiet=getattr(args, "quiet", False),
+        verbose=getattr(args, "verbose", False),
+    )
+
     if args.cmd is None:
         parser.print_help(sys.stderr)
         return 2
-    if args.cmd == "install":
-        return _cmd_install(args)
-    if args.cmd == "bootstrap":
-        return _cmd_bootstrap(args)
-    if args.cmd == "audit":
-        return _cmd_audit(args)
-    if args.cmd == "status":
-        return _cmd_status(args)
-    if args.cmd == "uninstall":
-        return _cmd_uninstall(args)
-    if args.cmd == "init":
-        return _cmd_init(args)
+
+    # Commands that don't need _effective_config
     if args.cmd == "doctor":
-        return _cmd_doctor(args)
+        from .commands.doctor import cmd_doctor
+        return cmd_doctor(args)
+    if args.cmd == "status":
+        from .commands.status import cmd_status
+        return cmd_status(args)
+    if args.cmd == "init":
+        from .commands.init import cmd_init
+        return cmd_init(args)
+    if args.cmd == "install":
+        from .commands.install import cmd_install
+        return cmd_install(args)
+    if args.cmd == "uninstall":
+        from .commands.uninstall import cmd_uninstall
+        return cmd_uninstall(args)
+    if args.cmd == "bootstrap":
+        from .commands.bootstrap import cmd_bootstrap
+        return cmd_bootstrap(args)
     if args.cmd == "secrets":
-        return _cmd_secrets(args)
+        from .commands.secrets import cmd_secrets
+        return cmd_secrets(args)
+
+    # Commands that need _effective_config
+    cfg = _effective_config(args)
+    if args.cmd == "scan":
+        from .commands.scan import cmd_scan
+        return cmd_scan(args, cfg)
     if args.cmd == "prepush":
-        return _cmd_prepush(args)
-    return _cmd_scan(args)
+        from .commands.prepush import cmd_prepush
+        return cmd_prepush(args, cfg)
+    if args.cmd == "audit":
+        from .commands.audit import cmd_audit
+        return cmd_audit(args, cfg)
+
+    parser.print_help(sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

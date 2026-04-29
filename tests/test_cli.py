@@ -55,7 +55,7 @@ def stub_opf(tmp_path: Path, monkeypatch) -> Path:
     gitleaks.write_text("#!/usr/bin/env python3\nimport sys\ntext=sys.stdin.read()\n\nif 'SECRET_LEAK' in text:\n    sys.stderr.write('leaks found: 1\\n')\n    sys.exit(1)\nsys.exit(0)\n")
     gitleaks.chmod(gitleaks.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setattr("git_shield.cli.has_cuda", lambda: True)
+    monkeypatch.setattr("git_shield.cuda.has_cuda", lambda: True)
     # Run from a clean cwd so the project's own `.pii-allowlist` doesn't bleed in.
     monkeypatch.chdir(tmp_path)
     # Empty $HOME too, so ~/.githooks/pii-allowlist.txt cannot interfere.
@@ -80,7 +80,7 @@ def test_cli_stdin_blocks_on_real_email(stub_opf, tmp_path):
         ["scan", "--stdin", "--device", "cpu", "--config", str(tmp_path / "missing.toml")],
         stdin="contact real.person@gmail.com today",
     )
-    assert code == 1
+    assert code == 3  # EXIT_PII
     assert "private_email" in err
     assert "real.person@gmail.com" not in err  # redacted
 
@@ -126,7 +126,7 @@ def test_cli_handles_opf_failure(stub_opf, tmp_path):
 
 def test_cli_skip_if_no_opf(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", "/nonexistent")
-    monkeypatch.setattr("git_shield.cli.has_cuda", lambda: True)
+    monkeypatch.setattr("git_shield.cuda.has_cuda", lambda: True)
     code, _, err = _run(
         [
             "scan", "--stdin", "--device", "cpu", "--skip-if-no-opf", "--skip-if-no-gitleaks",
@@ -151,7 +151,7 @@ def test_cli_max_total_bytes_refuses(stub_opf, tmp_path):
 
 
 def test_cli_cuda_skip_policy_when_no_cuda(stub_opf, monkeypatch, tmp_path):
-    monkeypatch.setattr("git_shield.cli.has_cuda", lambda: False)
+    monkeypatch.setattr("git_shield.cuda.has_cuda", lambda: False)
     code, _, err = _run(
         [
             "scan", "--stdin", "--device", "cuda", "--cuda-policy", "skip",
@@ -200,7 +200,7 @@ def test_cli_install_dry_run(tmp_path: Path):
 
 def test_cli_prepush_subcommand_skips_delete(stub_opf, monkeypatch, tmp_path):
     """A delete-only push (local-sha all zeroes) means no diff to scan."""
-    monkeypatch.setattr("git_shield.cli.diff_with_fallback", lambda *a, **kw: "")
+    monkeypatch.setattr("git_shield.diff.diff_with_fallback", lambda *a, **kw: "")
     code, _, err = _run(
         ["prepush", "--device", "cpu", "--config", str(tmp_path / "missing.toml")],
         stdin="refs/heads/x 0000000000000000000000000000000000000000 refs/heads/x abc\n",
@@ -220,14 +220,14 @@ def test_cli_prepush_no_refs(stub_opf, tmp_path):
 
 def test_cli_prepush_blocks_on_pii(stub_opf, monkeypatch, tmp_path):
     monkeypatch.setattr(
-        "git_shield.cli.diff_with_fallback",
+        "git_shield.diff.diff_with_fallback",
         lambda *a, **kw: "diff --git a/x b/x\n+++ b/x\n@@\n+real.person@gmail.com\n",
     )
     code, _, err = _run(
         ["prepush", "--device", "cpu", "--config", str(tmp_path / "missing.toml")],
         stdin="refs/heads/main aaa refs/heads/main bbb\n",
     )
-    assert code == 1
+    assert code == 3  # EXIT_PII
     assert "private_email" in err
 
 
@@ -242,8 +242,8 @@ def test_cli_prepush_skips_pii_outside_touched_lines(stub_opf, monkeypatch, tmp_
         "+harmless added line\n"
     )
     full = "harmless added line\nreal.person@gmail.com\n"  # email lives on line 2 (untouched)
-    monkeypatch.setattr("git_shield.cli.diff_with_fallback", lambda *a, **kw: diff)
-    monkeypatch.setattr("git_shield.cli.show_blob", lambda *a, **kw: full)
+    monkeypatch.setattr("git_shield.diff.diff_with_fallback", lambda *a, **kw: diff)
+    monkeypatch.setattr("git_shield.diff.show_blob", lambda *a, **kw: full)
     code, _, err = _run(
         ["prepush", "--device", "cpu", "--config", str(tmp_path / "missing.toml")],
         stdin="refs/heads/main aaa refs/heads/main bbb\n",
@@ -262,13 +262,13 @@ def test_cli_prepush_blocks_pii_on_touched_line(stub_opf, monkeypatch, tmp_path)
         "+real.person@gmail.com\n"
     )
     full = "context line\nreal.person@gmail.com\nmore context\n"  # email on line 2 (touched)
-    monkeypatch.setattr("git_shield.cli.diff_with_fallback", lambda *a, **kw: diff)
-    monkeypatch.setattr("git_shield.cli.show_blob", lambda *a, **kw: full)
+    monkeypatch.setattr("git_shield.diff.diff_with_fallback", lambda *a, **kw: diff)
+    monkeypatch.setattr("git_shield.diff.show_blob", lambda *a, **kw: full)
     code, _, err = _run(
         ["prepush", "--device", "cpu", "--config", str(tmp_path / "missing.toml")],
         stdin="refs/heads/main aaa refs/heads/main bbb\n",
     )
-    assert code == 1
+    assert code == 3  # EXIT_PII
     assert "private_email" in err
     assert "line 2" in err
 

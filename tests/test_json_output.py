@@ -7,7 +7,7 @@ from git_shield.cli import main
 
 def test_doctor_json(monkeypatch):
     monkeypatch.setattr(
-        "git_shield.cli.collect_checks",
+        "git_shield.commands.doctor.collect_checks",
         lambda *_args: [],
     )
     out = io.StringIO()
@@ -20,7 +20,7 @@ def test_doctor_json(monkeypatch):
 
 
 def test_status_json(tmp_path, monkeypatch):
-    monkeypatch.setattr("git_shield.cli.collect_checks", lambda: [])
+    monkeypatch.setattr("git_shield.commands.status.collect_checks", lambda: [])
     repo = tmp_path / "repo"
     (repo / ".git" / "hooks").mkdir(parents=True)
     out = io.StringIO()
