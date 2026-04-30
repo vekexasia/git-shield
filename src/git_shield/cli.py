@@ -65,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--timeout", type=int, default=180)
     doctor.add_argument("--json", action="store_true", help="write machine-readable JSON to stdout")
     doctor.add_argument("--install", action="store_true", help="auto-install missing dependencies (gitleaks, opf)")
+    doctor.add_argument("--check-updates", action="store_true", help="check whether a newer gitleaks release is available")
 
     status = sub.add_parser("status", help="show installed hooks, config, allowlists, and dependencies")
     status.add_argument("--repo", default=Path("."), type=Path)

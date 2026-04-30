@@ -8,7 +8,7 @@ from git_shield.cli import main
 def test_doctor_json(monkeypatch):
     monkeypatch.setattr(
         "git_shield.commands.doctor.collect_checks",
-        lambda *_args: [],
+        lambda *_args, **_kwargs: [],
     )
     out = io.StringIO()
     with redirect_stdout(out):

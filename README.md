@@ -97,6 +97,7 @@ git-shield --version                           # print version
 git-shield doctor                              # check dependencies
 git-shield doctor --smoke                      # run synthetic smoke tests
 git-shield doctor --install                    # auto-install missing dependencies
+git-shield doctor --check-updates             # check latest gitleaks release
 git-shield doctor --json                       # machine-readable output
 git-shield status --global                     # show hooks and dependencies
 git-shield status --global --json              # machine-readable hook status
@@ -232,10 +233,10 @@ git-shield uninstall
 
 ## Auto-install dependencies
 
-`git-shield doctor --install` attempts to download and install gitleaks and opf automatically:
+`git-shield doctor --install` attempts to download and install missing dependencies. With `--check-updates`, it can also update an outdated gitleaks install:
 
 ```bash
-git-shield doctor --install
+git-shield doctor --install --check-updates
 ```
 
 For a full guided setup including auto-install:

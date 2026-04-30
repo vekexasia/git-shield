@@ -15,7 +15,7 @@ from pathlib import Path
 from .output import error, info, success, warn
 
 # gitleaks release URLs
-GITLEAKS_VERSION = "8.24.3"
+GITLEAKS_VERSION = "8.30.1"
 GITLEAKS_BASE = f"https://github.com/gitleaks/gitleaks/releases/download/v{GITLEAKS_VERSION}"
 
 

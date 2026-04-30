@@ -52,12 +52,12 @@ def _try_install_missing(checks, args: argparse.Namespace) -> None:
     """Attempt to auto-install missing dependencies when --install is passed."""
     from ..installer import install_gitleaks, install_opf
 
-    missing = [c for c in checks if not c.ok and c.required]
+    missing = [c for c in checks if not c.ok and (c.required or c.name == "gitleaks-update")]
     if not missing:
         return
 
     for check in missing:
-        if check.name == "gitleaks":
+        if check.name in {"gitleaks", "gitleaks-update"}:
             info("Auto-installing gitleaks...")
             result = install_gitleaks()
             if result:
@@ -72,12 +72,13 @@ def _try_install_missing(checks, args: argparse.Namespace) -> None:
 def cmd_doctor(args: argparse.Namespace) -> int:
     do_install = getattr(args, "install", False) or getattr(args, "install_deps", False)
 
-    checks = collect_checks(args.opf_bin, args.gitleaks_bin)
+    check_updates = getattr(args, "check_updates", False)
+    checks = collect_checks(args.opf_bin, args.gitleaks_bin, check_updates=check_updates)
 
     if do_install and not checks_ok(checks):
         _try_install_missing(checks, args)
         # Re-check after install attempts
-        checks = collect_checks(args.opf_bin, args.gitleaks_bin)
+        checks = collect_checks(args.opf_bin, args.gitleaks_bin, check_updates=check_updates)
 
     smoke = None
     if args.smoke and checks_ok(checks):
