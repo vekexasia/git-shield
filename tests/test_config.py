@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from git_shield.config import Config, DEFAULT_LABELS, load_config
+import pytest
+
+from git_shield.config import Config, ConfigError, DEFAULT_LABELS, load_config
 
 
 def test_load_missing_file_returns_defaults(tmp_path: Path):
@@ -40,3 +42,20 @@ allowlist_paths = ["/etc/p.txt"]
 
 def test_default_labels_cover_required():
     assert {"private_email", "private_phone", "private_person", "secret"} <= DEFAULT_LABELS
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('backend = "bad"', "backend"),
+        ('cuda_policy = "sometimes"', "cuda_policy"),
+        ('timeout_seconds = 0', "timeout_seconds"),
+        ('labels = "private_email"', "labels"),
+    ],
+)
+def test_load_config_validates_values(tmp_path: Path, body: str, message: str):
+    path = tmp_path / "git-shield.toml"
+    path.write_text(f"[git_shield]\n{body}\n")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)

@@ -184,7 +184,7 @@ Allow public/test values with narrow regexes in `.pii-allowlist`:
 (?i)^git@github\.com$
 ```
 
-Also checks `~/.githooks/pii-allowlist.txt` and extra paths in `allowlist_paths`.
+Also checks `~/.githooks/pii-allowlist.txt` and extra paths in `allowlist_paths`. Config values are validated at startup; invalid backends, CUDA policies, non-positive size limits, or malformed string lists fail with a config error before scanning.
 
 ## pre-commit framework
 
@@ -264,7 +264,7 @@ GLiNER is lighter than OPF (uses a BERT-based model vs the full OPF model) and r
 
 ## Scan result caching
 
-Git Shield caches scan results by content hash to avoid re-scanning unchanged files. The cache is stored in `.git/git-shield-cache.json` and auto-expires after 7 days.
+Git Shield caches clean scan results to avoid re-scanning unchanged files. The cache is stored in `.git/git-shield-cache.json` and auto-expires after 7 days. Cache entries are keyed by scanned content plus relevant scanner configuration, labels, limits, and allowlist file state, so changing policy invalidates old clean results.
 
 ```bash
 # Bypass cache for one scan

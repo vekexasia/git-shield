@@ -28,9 +28,37 @@ def _cache_path() -> Path:
     return Path(proc.stdout.strip()) / _CACHE_FILENAME
 
 
-def _content_hash(text: str) -> str:
-    """Fast content hash for cache key."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+def _content_hash(text: str, signature: str | None = None) -> str:
+    """Fast content/config hash for cache key."""
+    payload = text if signature is None else f"{signature}\0{text}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def cache_signature(cfg: object, allowlist_paths: list[Path] | tuple[Path, ...] = ()) -> str:
+    allowlists: list[dict[str, str | int | None]] = []
+    for path in allowlist_paths:
+        try:
+            stat = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+            allowlists.append({"path": str(path), "mtime_ns": stat.st_mtime_ns, "sha256": digest})
+        except OSError:
+            allowlists.append({"path": str(path), "mtime_ns": None, "sha256": None})
+
+    payload = {
+        "version": 2,
+        "backend": getattr(cfg, "backend", None),
+        "device": getattr(cfg, "device", None),
+        "cuda_policy": getattr(cfg, "cuda_policy", None),
+        "opf_bin": getattr(cfg, "opf_bin", None),
+        "gitleaks_bin": getattr(cfg, "gitleaks_bin", None),
+        "max_bytes_per_chunk": getattr(cfg, "max_bytes_per_chunk", None),
+        "max_total_bytes": getattr(cfg, "max_total_bytes", None),
+        "labels": sorted(getattr(cfg, "labels", ())),
+        "ignore_globs": list(getattr(cfg, "ignore_globs", ())),
+        "cpu_small_threshold": getattr(cfg, "cpu_small_threshold", None),
+        "allowlists": allowlists,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
 def load_cache() -> dict[str, dict]:
@@ -67,26 +95,34 @@ def save_cache(cache: dict[str, dict]) -> None:
         pass  # non-fatal
 
 
-def cache_lookup(cache: dict[str, dict], text: str) -> dict | None:
-    """Look up cached scan results for a text payload.
+def cache_lookup(cache: dict[str, dict], text: str, signature: str | None = None) -> dict | None:
+    """Look up cached scan results for a text/config payload.
 
     Returns the cached entry if found, None otherwise.
     """
-    key = _content_hash(text)
+    key = _content_hash(text, signature)
     entry = cache.get(key)
     if entry is None:
         return None
-    # Verify the cache entry is for the same content (hash collision check)
     if entry.get("hash") != key:
+        return None
+    if entry.get("signature") != signature:
         return None
     return entry
 
 
-def cache_store(cache: dict[str, dict], text: str, secret_clean: bool, pii_clean: bool) -> None:
+def cache_store(
+    cache: dict[str, dict],
+    text: str,
+    secret_clean: bool,
+    pii_clean: bool,
+    signature: str | None = None,
+) -> None:
     """Store scan results in the cache."""
-    key = _content_hash(text)
+    key = _content_hash(text, signature)
     cache[key] = {
         "hash": key,
+        "signature": signature,
         "secret_clean": secret_clean,
         "pii_clean": pii_clean,
         "ts": time.time(),

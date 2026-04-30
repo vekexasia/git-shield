@@ -40,6 +40,10 @@ DEFAULT_IGNORE_GLOBS: tuple[str, ...] = (
 )
 
 
+class ConfigError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class Config:
     device: str = "cuda"
@@ -56,22 +60,57 @@ class Config:
     allowlist_paths: tuple[Path, ...] = ()
 
 
+def _string_list(section: dict, key: str, default: tuple[str, ...] | list[str]) -> list[str]:
+    value = section.get(key, default)
+    if not isinstance(value, list | tuple) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(f"git-shield config '{key}' must be a list of strings")
+    return list(value)
+
+
+def _positive_int(section: dict, key: str, default: int) -> int:
+    value = section.get(key, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"git-shield config '{key}' must be a positive integer") from exc
+    if parsed <= 0:
+        raise ConfigError(f"git-shield config '{key}' must be a positive integer")
+    return parsed
+
+
+def _string_value(section: dict, key: str, default: str) -> str:
+    value = section.get(key, default)
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"git-shield config '{key}' must be a non-empty string")
+    return value
+
+
 def load_config(path: Path | None) -> Config:
     if path is None or not path.exists():
         return Config()
     raw = tomllib.loads(path.read_text())
     section = raw.get("git_shield", raw.get("privacy_prepush", raw))
+    if not isinstance(section, dict):
+        raise ConfigError("git-shield config section must be a table")
+
+    backend = _string_value(section, "backend", "opf")
+    if backend not in {"opf", "gliner"}:
+        raise ConfigError("git-shield config 'backend' must be one of: opf, gliner")
+    cuda_policy = _string_value(section, "cuda_policy", "cpu-small")
+    if cuda_policy not in {"fail", "skip", "cpu-small"}:
+        raise ConfigError("git-shield config 'cuda_policy' must be one of: fail, skip, cpu-small")
+
     return Config(
-        device=section.get("device", "cuda"),
-        backend=section.get("backend", "opf"),
-        opf_bin=section.get("opf_bin", "opf"),
-        gitleaks_bin=section.get("gitleaks_bin", "gitleaks"),
-        timeout_seconds=int(section.get("timeout_seconds", 180)),
-        max_bytes_per_chunk=int(section.get("max_bytes_per_chunk", 64 * 1024)),
-        max_total_bytes=int(section.get("max_total_bytes", 2 * 1024 * 1024)),
-        labels=frozenset(section.get("labels", list(DEFAULT_LABELS))),
-        ignore_globs=tuple(section.get("ignore_globs", DEFAULT_IGNORE_GLOBS)),
-        cuda_policy=section.get("cuda_policy", "cpu-small"),
-        cpu_small_threshold=int(section.get("cpu_small_threshold", 16 * 1024)),
-        allowlist_paths=tuple(Path(p) for p in section.get("allowlist_paths", [])),
+        device=_string_value(section, "device", "cuda"),
+        backend=backend,
+        opf_bin=_string_value(section, "opf_bin", "opf"),
+        gitleaks_bin=_string_value(section, "gitleaks_bin", "gitleaks"),
+        timeout_seconds=_positive_int(section, "timeout_seconds", 180),
+        max_bytes_per_chunk=_positive_int(section, "max_bytes_per_chunk", 64 * 1024),
+        max_total_bytes=_positive_int(section, "max_total_bytes", 2 * 1024 * 1024),
+        labels=frozenset(_string_list(section, "labels", list(DEFAULT_LABELS))),
+        ignore_globs=tuple(_string_list(section, "ignore_globs", list(DEFAULT_IGNORE_GLOBS))),
+        cuda_policy=cuda_policy,
+        cpu_small_threshold=_positive_int(section, "cpu_small_threshold", 16 * 1024),
+        allowlist_paths=tuple(Path(p) for p in _string_list(section, "allowlist_paths", [])),
     )

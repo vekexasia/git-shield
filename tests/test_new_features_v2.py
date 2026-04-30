@@ -173,6 +173,21 @@ class TestParallelScanning:
         assert code == 0
         assert findings == []
 
+    def test_parallel_secrets_tool_failure_returns_error(self, monkeypatch):
+        from git_shield.commands import _scan_common
+        from git_shield.config import Config
+        from git_shield.output import EXIT_ERROR
+        from git_shield.secrets import SecretScanError
+
+        def fail_scan(*_args, **_kwargs):
+            raise SecretScanError("boom")
+
+        monkeypatch.setattr(_scan_common, "scan_secrets_with_gitleaks", fail_scan)
+        code, findings = _scan_common.scan_secrets_files({"file.txt": "content"}, Config())
+
+        assert code == EXIT_ERROR
+        assert findings == []
+
 
 # ---------------------------------------------------------------------------
 # Item 3: Scan result caching
@@ -202,6 +217,24 @@ class TestCaching:
         loaded = load_cache()
         entry = cache_lookup(loaded, "different text")
         assert entry is None
+
+    def test_cache_signature_miss_when_config_changes(self):
+        from git_shield.cache import cache_lookup, cache_signature, cache_store
+        from git_shield.config import Config
+
+        cache = {}
+        email_cfg = Config(labels=frozenset({"private_email"}))
+        phone_cfg = Config(labels=frozenset({"private_phone"}))
+        cache_store(
+            cache,
+            "same text",
+            secret_clean=True,
+            pii_clean=True,
+            signature=cache_signature(email_cfg),
+        )
+
+        assert cache_lookup(cache, "same text", cache_signature(email_cfg)) is not None
+        assert cache_lookup(cache, "same text", cache_signature(phone_cfg)) is None
 
     def test_no_cache_flag_accepted(self, stub_env, tmp_path):
         """--no-cache flag should be accepted."""

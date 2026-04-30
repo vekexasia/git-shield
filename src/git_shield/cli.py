@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import Config, load_config
+from .config import Config, ConfigError, load_config
 from .output import set_verbosity
 
 
@@ -159,7 +159,11 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_secrets(args)
 
     # Commands that need _effective_config
-    cfg = _effective_config(args)
+    try:
+        cfg = _effective_config(args)
+    except ConfigError as exc:
+        print(f"git-shield: {exc}", file=sys.stderr)
+        return 2
     if args.cmd == "scan":
         from .commands.scan import cmd_scan
         return cmd_scan(args, cfg)

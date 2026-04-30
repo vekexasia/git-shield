@@ -184,7 +184,9 @@ def scan_secrets_files(
         error(msg)
         error("Install gitleaks or pass --skip-if-no-gitleaks.")
         return EXIT_ERROR, []
-    if blocked_flag or failed:
+    if failed:
+        return EXIT_ERROR, all_findings
+    if blocked_flag:
         return EXIT_SECRETS, all_findings
     success("No gitleaks secret findings.")
     return EXIT_CLEAN, []
@@ -357,7 +359,7 @@ def scan_file_payloads(
     use_cache: bool = True,
 ) -> ScanResult:
     """Full scan: secrets then PII. Returns ScanResult with combined exit code."""
-    from ..cache import load_cache, save_cache, cache_lookup, cache_store
+    from ..cache import load_cache, save_cache, cache_lookup, cache_store, cache_signature
 
     payloads = {
         path: pl for path, pl in payloads.items()
@@ -367,12 +369,13 @@ def scan_file_payloads(
         info("No added text to scan.")
         return ScanResult(EXIT_CLEAN, [], [])
 
-    # Cache: skip files whose content was previously scanned clean.
+    # Cache: skip files whose content/config was previously scanned clean.
     cache = load_cache() if use_cache else {}
+    cache_sig = cache_signature(cfg, _allowlist_paths(cfg, extra_allowlist)) if use_cache else None
     cached_clean: set[str] = set()
     if cache:
         for path, pl in payloads.items():
-            entry = cache_lookup(cache, pl.secret_text + pl.pii_text)
+            entry = cache_lookup(cache, pl.secret_text + pl.pii_text, cache_sig)
             if entry and entry.get("secret_clean") and entry.get("pii_clean"):
                 cached_clean.add(path)
         if cached_clean:
@@ -380,7 +383,6 @@ def scan_file_payloads(
             payloads = {p: pl for p, pl in payloads.items() if p not in cached_clean}
             if not payloads:
                 return ScanResult(EXIT_CLEAN, [], [])
-
     secret_findings: list[dict[str, str | int | None]] = []
     secret_code = EXIT_CLEAN
     if not skip_secrets:
@@ -399,7 +401,7 @@ def scan_file_payloads(
     # Store clean results in cache.
     if use_cache and secret_code == EXIT_CLEAN and pii_code == EXIT_CLEAN:
         for path, pl in payloads.items():
-            cache_store(cache, pl.secret_text + pl.pii_text, secret_clean=True, pii_clean=True)
+            cache_store(cache, pl.secret_text + pl.pii_text, secret_clean=True, pii_clean=True, signature=cache_sig)
         save_cache(cache)
 
     if secret_code != EXIT_CLEAN:
